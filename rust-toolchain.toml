@@ -1,0 +1,5 @@
+# Pinned so local and CI builds match, and a new Rust release cannot turn CI red on its own.
+# Keep in sync with .github/workflows/test.yml.
+[toolchain]
+channel = "1.96.0"
+components = ["clippy", "rustfmt"]
