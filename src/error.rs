@@ -90,14 +90,23 @@ pub struct Status {
 pub enum Error {
     /// A packet ended before a field it declared. Carries what was asked for and what was left, so
     /// a fixture that is one byte short says so instead of saying "bad message".
-    Truncated { needed: usize, had: usize },
+    Truncated {
+        needed: usize,
+        had: usize,
+    },
     /// A length field a correct server would never send. **This is the guard against an allocation
     /// sized by the far end** — see `session::Limits::max_inbound_packet`.
-    TooLong { len: u64, limit: u64 },
+    TooLong {
+        len: u64,
+        limit: u64,
+    },
     /// A packet type byte this client does not implement.
     UnknownPacketType(u8),
     /// A reply arrived whose type cannot answer the request that is waiting.
-    UnexpectedReply { expected: &'static str, got: u8 },
+    UnexpectedReply {
+        expected: &'static str,
+        got: u8,
+    },
     /// A reply arrived carrying a request id nothing is waiting on.
     UnknownRequestId(u32),
     /// A new request drew an id that is **already outstanding** — the `u32` counter wrapped.
@@ -111,7 +120,10 @@ pub enum Error {
     /// The server answered the request with `SSH_FXP_STATUS` and a failing code.
     Status(Status),
     /// The server offered a protocol version this client does not speak.
-    UnsupportedVersion { theirs: u32, ours: u32 },
+    UnsupportedVersion {
+        theirs: u32,
+        ours: u32,
+    },
     /// The session ended, and this is why.
     ///
     /// ⚠️ **`Arc` is what lets every waiter learn the real cause, and it is not decoration.**
@@ -120,7 +132,9 @@ pub enum Error {
     /// answers, and "first" was whichever one `HashMap::drain` happened to yield, which is
     /// nondeterministic. Worse, `Eof` is a **false statement** for the cases that matter most: on a
     /// `TooLong` refusal the stream is not over at all — this client refused to continue.
-    SessionEnded { cause: std::sync::Arc<Error> },
+    SessionEnded {
+        cause: std::sync::Arc<Error>,
+    },
     /// The request could not be written to the stream inside the budget.
     ///
     /// ⚠️ **Distinct from `Timeout`, and the distinction is the whole point.** `Timeout` means the
@@ -143,7 +157,10 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Truncated { needed, had } => {
-                write!(f, "packet truncated: needed {needed} bytes, {had} remaining")
+                write!(
+                    f,
+                    "packet truncated: needed {needed} bytes, {had} remaining"
+                )
             }
             Self::TooLong { len, limit } => {
                 write!(f, "declared length {len} exceeds the limit {limit}")
@@ -156,7 +173,10 @@ impl fmt::Display for Error {
             Self::RequestIdInUse(id) => write!(f, "request id {id} is already outstanding"),
             Self::Status(s) => write!(f, "server status {:?}: {}", s.code, s.message),
             Self::UnsupportedVersion { theirs, ours } => {
-                write!(f, "server offered SFTP version {theirs}, this client speaks {ours}")
+                write!(
+                    f,
+                    "server offered SFTP version {theirs}, this client speaks {ours}"
+                )
             }
             Self::SessionEnded { cause } => write!(f, "session ended: {cause}"),
             Self::WriteTimeout => write!(f, "the request could not be written within the budget"),
@@ -194,7 +214,11 @@ mod tests {
         // Mutation: swap any two arms of `from_wire` (e.g. 2 and 3). This reddens because the
         // round trip is checked against the *number*, not against the enum's own ordering.
         for v in 0..=8u32 {
-            assert_eq!(StatusCode::from_wire(v).to_wire(), v, "code {v} did not round trip");
+            assert_eq!(
+                StatusCode::from_wire(v).to_wire(),
+                v,
+                "code {v} did not round trip"
+            );
         }
     }
 

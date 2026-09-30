@@ -138,7 +138,11 @@ fn the_fixtures_are_internally_consistent() {
         ("FILE_HANDLE", FILE_HANDLE_REPLY),
     ] {
         let declared = u32::from_be_bytes([f[0], f[1], f[2], f[3]]) as usize;
-        assert_eq!(declared, f.len() - 4, "{name}: declared length disagrees with the array");
+        assert_eq!(
+            declared,
+            f.len() - 4,
+            "{name}: declared length disagrees with the array"
+        );
     }
 }
 
@@ -152,16 +156,22 @@ async fn a_listing_returns_the_servers_bytes_and_a_file_opens_by_them() {
         seen.push(read_frame(&mut server_side).await); // SSH_FXP_INIT
         server_side.write_all(VERSION_REPLY).await.unwrap();
 
-        for reply in
-            [DIR_HANDLE_REPLY, NAME_REPLY, EOF_REPLY, CLOSE_OK_REPLY, FILE_HANDLE_REPLY]
-        {
+        for reply in [
+            DIR_HANDLE_REPLY,
+            NAME_REPLY,
+            EOF_REPLY,
+            CLOSE_OK_REPLY,
+            FILE_HANDLE_REPLY,
+        ] {
             seen.push(read_frame(&mut server_side).await);
             server_side.write_all(reply).await.unwrap();
         }
         seen
     });
 
-    let session = Session::open(client_side, Config::default()).await.expect("handshake");
+    let session = Session::open(client_side, Config::default())
+        .await
+        .expect("handshake");
     assert_eq!(session.server_version().version, 3);
 
     let entries = session.list_dir(b"/home/user").await.expect("listing");
@@ -171,12 +181,22 @@ async fn a_listing_returns_the_servers_bytes_and_a_file_opens_by_them() {
     // Mutation that reddens it: decode the filename with `String::from_utf8_lossy(..).into_bytes()`
     // in `wire::Reader::string`. That is the upstream defect in one line, and this fails with
     // `EF BF BD D1 B1 EF BF BD 2E 74 78 74` against the expected eight bytes.
-    assert_eq!(entries.len(), 2, "the extension tail must not have eaten entry two");
-    assert_eq!(entries[0].filename, KOREAN_NAME, "the server's bytes, unchanged");
+    assert_eq!(
+        entries.len(),
+        2,
+        "the extension tail must not have eaten entry two"
+    );
+    assert_eq!(
+        entries[0].filename, KOREAN_NAME,
+        "the server's bytes, unchanged"
+    );
     // Mutation: swap the `filename` and `longname` lines in `Response::decode`'s NAME arm. With
     // the two fields carrying different bytes this reddens; with the fixture repeating one value in
     // both, it did not.
-    assert_eq!(entries[0].longname, b"-rw-\xC7\xD1\xB1\xDB.txt", "longname is NOT the filename");
+    assert_eq!(
+        entries[0].longname, b"-rw-\xC7\xD1\xB1\xDB.txt",
+        "longname is NOT the filename"
+    );
     assert_eq!(entries[0].attrs.size, Some(42));
     assert_eq!(entries[0].attrs.file_type(), Some(FileType::Regular));
     assert_eq!(entries[0].attrs.permissions(), Some(0o644));
@@ -186,7 +206,10 @@ async fn a_listing_returns_the_servers_bytes_and_a_file_opens_by_them() {
 
     // ── ② An ordinary UTF-8 name is unaffected, and it is only reachable through the tail. ──
     assert_eq!(entries[1].filename, b"next");
-    assert_eq!(entries[1].longname, b"dnext", "and distinct in the second entry too");
+    assert_eq!(
+        entries[1].longname, b"dnext",
+        "and distinct in the second entry too"
+    );
     assert_eq!(entries[1].attrs.file_type(), Some(FileType::Directory));
     assert_eq!(entries[1].attrs.permissions(), Some(0o755));
 
@@ -211,7 +234,11 @@ async fn a_listing_returns_the_servers_bytes_and_a_file_opens_by_them() {
     assert_eq!(*open_type, 3, "SSH_FXP_OPEN");
     assert_eq!(&open_body[0..4], &[0, 0, 0, 5], "request id 5");
     assert_eq!(&open_body[4..8], &[0, 0, 0, 8], "path length 8");
-    assert_eq!(&open_body[8..16], KOREAN_NAME, "the path on the wire is the server's bytes");
+    assert_eq!(
+        &open_body[8..16],
+        KOREAN_NAME,
+        "the path on the wire is the server's bytes"
+    );
 
     // The handshake, and the four requests a listing costs.
     assert_eq!(seen[0].0, 1, "SSH_FXP_INIT");
@@ -255,9 +282,19 @@ async fn corrupting_one_byte_of_the_fixture_changes_exactly_that_byte() {
     let entries = session.list_dir(b"/home/user").await.unwrap();
     server.await.unwrap();
 
-    assert_ne!(entries[0].filename, KOREAN_NAME, "the corrupted byte must be visible");
-    assert_eq!(entries[0].filename[0], 0xC8, "and it must be exactly the byte that was flipped");
-    assert_eq!(&entries[0].filename[1..], &KOREAN_NAME[1..], "nothing else moved");
+    assert_ne!(
+        entries[0].filename, KOREAN_NAME,
+        "the corrupted byte must be visible"
+    );
+    assert_eq!(
+        entries[0].filename[0], 0xC8,
+        "and it must be exactly the byte that was flipped"
+    );
+    assert_eq!(
+        &entries[0].filename[1..],
+        &KOREAN_NAME[1..],
+        "nothing else moved"
+    );
 }
 
 #[tokio::test]
@@ -297,12 +334,21 @@ async fn a_packet_larger_than_the_configured_ceiling_is_refused_before_it_is_all
     let (client_side, mut server_side) = tokio::io::duplex(1024);
     tokio::spawn(async move {
         read_frame(&mut server_side).await;
-        server_side.write_all(&[0x00, 0x10, 0x00, 0x00, 0x02]).await.unwrap();
+        server_side
+            .write_all(&[0x00, 0x10, 0x00, 0x00, 0x02])
+            .await
+            .unwrap();
     });
 
-    let config = Config { max_inbound_packet: 4096, ..Config::default() };
+    let config = Config {
+        max_inbound_packet: 4096,
+        ..Config::default()
+    };
     match Session::open(client_side, config).await {
-        Err(Error::TooLong { len: 1_048_576, limit: 4096 }) => {}
+        Err(Error::TooLong {
+            len: 1_048_576,
+            limit: 4096,
+        }) => {}
         other => panic!("expected TooLong, got {other:?}"),
     }
 }

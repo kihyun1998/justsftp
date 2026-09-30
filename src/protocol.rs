@@ -128,26 +128,73 @@ pub struct DirEntry {
 /// has no such ambiguity, so it stays.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
-    Open { path: Vec<u8>, flags: OpenFlags, attrs: AttrsUpdate },
-    Close { handle: Handle },
-    Read { handle: Handle, offset: u64, len: u32 },
-    Write { handle: Handle, offset: u64, data: Vec<u8> },
-    LStat { path: Vec<u8> },
-    FStat { handle: Handle },
-    SetStat { path: Vec<u8>, attrs: AttrsUpdate },
-    FSetStat { handle: Handle, attrs: AttrsUpdate },
-    OpenDir { path: Vec<u8> },
-    ReadDir { handle: Handle },
-    Remove { path: Vec<u8> },
-    MkDir { path: Vec<u8>, attrs: AttrsUpdate },
-    RmDir { path: Vec<u8> },
-    RealPath { path: Vec<u8> },
-    Stat { path: Vec<u8> },
-    Rename { from: Vec<u8>, to: Vec<u8> },
-    ReadLink { path: Vec<u8> },
+    Open {
+        path: Vec<u8>,
+        flags: OpenFlags,
+        attrs: AttrsUpdate,
+    },
+    Close {
+        handle: Handle,
+    },
+    Read {
+        handle: Handle,
+        offset: u64,
+        len: u32,
+    },
+    Write {
+        handle: Handle,
+        offset: u64,
+        data: Vec<u8>,
+    },
+    LStat {
+        path: Vec<u8>,
+    },
+    FStat {
+        handle: Handle,
+    },
+    SetStat {
+        path: Vec<u8>,
+        attrs: AttrsUpdate,
+    },
+    FSetStat {
+        handle: Handle,
+        attrs: AttrsUpdate,
+    },
+    OpenDir {
+        path: Vec<u8>,
+    },
+    ReadDir {
+        handle: Handle,
+    },
+    Remove {
+        path: Vec<u8>,
+    },
+    MkDir {
+        path: Vec<u8>,
+        attrs: AttrsUpdate,
+    },
+    RmDir {
+        path: Vec<u8>,
+    },
+    RealPath {
+        path: Vec<u8>,
+    },
+    Stat {
+        path: Vec<u8>,
+    },
+    Rename {
+        from: Vec<u8>,
+        to: Vec<u8>,
+    },
+    ReadLink {
+        path: Vec<u8>,
+    },
     /// `SSH_FXP_EXTENDED`: the extension's name, then its request-specific fields already encoded.
     /// The fields carry no length prefix of their own — each extension defines its own layout.
-    Extended { name: Vec<u8>, data: Vec<u8> },
+    Extended {
+        name: Vec<u8>,
+        data: Vec<u8>,
+    },
 }
 
 impl Request {
@@ -187,12 +234,20 @@ impl Request {
             Self::Close { handle } | Self::FStat { handle } | Self::ReadDir { handle } => {
                 w.string(handle.as_bytes());
             }
-            Self::Read { handle, offset, len } => {
+            Self::Read {
+                handle,
+                offset,
+                len,
+            } => {
                 w.string(handle.as_bytes());
                 w.u64(*offset);
                 w.u32(*len);
             }
-            Self::Write { handle, offset, data } => {
+            Self::Write {
+                handle,
+                offset,
+                data,
+            } => {
                 w.string(handle.as_bytes());
                 w.u64(*offset);
                 w.string(data);
@@ -355,7 +410,10 @@ pub(crate) fn decode_version(r: &mut Reader<'_>) -> Result<ServerVersion> {
         let value = r.string()?;
         extensions.push((name, value));
     }
-    Ok(ServerVersion { version, extensions })
+    Ok(ServerVersion {
+        version,
+        extensions,
+    })
 }
 
 #[cfg(test)]
@@ -366,9 +424,15 @@ mod tests {
     fn a_request_frames_as_length_type_id_then_fields() {
         // Mutation: reorder `w.u32(id)` after the path in `encode`. Every server would then read the
         // first four bytes of the path as the request id.
-        let req = Request::Stat { path: b"/tmp".to_vec() };
+        let req = Request::Stat {
+            path: b"/tmp".to_vec(),
+        };
         let bytes = req.encode(0x0102_0304);
-        assert_eq!(&bytes[..4], &[0, 0, 0, 13], "1 type + 4 id + 4 len + 4 path = 13");
+        assert_eq!(
+            &bytes[..4],
+            &[0, 0, 0, 13],
+            "1 type + 4 id + 4 len + 4 path = 13"
+        );
         assert_eq!(bytes[4], packet::STAT);
         assert_eq!(&bytes[5..9], &[1, 2, 3, 4], "request id");
         assert_eq!(&bytes[9..13], &[0, 0, 0, 4], "path length");
@@ -421,10 +485,23 @@ mod tests {
         // Mutation: type `Handle` as `String`. Non-compiling, so the runnable one is to route the
         // handle through `from_utf8_lossy` in `Request::encode`; this reddens.
         let handle = Handle(vec![0x00, 0xFF, 0x80, 0x01]);
-        let bytes = Request::Read { handle, offset: 0x1122_3344_5566_7788, len: 4096 }.encode(7);
+        let bytes = Request::Read {
+            handle,
+            offset: 0x1122_3344_5566_7788,
+            len: 4096,
+        }
+        .encode(7);
         assert_eq!(&bytes[9..13], &[0, 0, 0, 4], "handle length");
-        assert_eq!(&bytes[13..17], &[0x00, 0xFF, 0x80, 0x01], "handle bytes, unchanged");
-        assert_eq!(&bytes[17..25], &[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88], "offset u64");
+        assert_eq!(
+            &bytes[13..17],
+            &[0x00, 0xFF, 0x80, 0x01],
+            "handle bytes, unchanged"
+        );
+        assert_eq!(
+            &bytes[17..25],
+            &[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88],
+            "offset u64"
+        );
         assert_eq!(&bytes[25..29], &[0, 0, 0x10, 0x00], "len 4096");
     }
 
@@ -444,7 +521,11 @@ mod tests {
         assert_eq!(bytes[4], packet::WRITE);
         assert_eq!(&bytes[5..9], &[0, 0, 0, 9], "request id");
         assert_eq!(&bytes[9..14], &[0, 0, 0, 1, 0xAA], "handle");
-        assert_eq!(&bytes[14..22], &[1, 2, 3, 4, 5, 6, 7, 8], "offset, u64 big-endian");
+        assert_eq!(
+            &bytes[14..22],
+            &[1, 2, 3, 4, 5, 6, 7, 8],
+            "offset, u64 big-endian"
+        );
         assert_eq!(&bytes[22..28], &[0, 0, 0, 2, 0xDE, 0xAD], "data");
         assert_eq!(bytes.len(), 28);
     }
@@ -464,7 +545,10 @@ mod tests {
         assert_eq!(Response::Handle(Handle(vec![])).packet_type(), 102);
         assert_eq!(Response::Data(vec![]).packet_type(), 103);
         assert_eq!(Response::Name(vec![]).packet_type(), 104);
-        assert_eq!(Response::Attrs(FileAttributes::default()).packet_type(), 105);
+        assert_eq!(
+            Response::Attrs(FileAttributes::default()).packet_type(),
+            105
+        );
         assert_eq!(Response::ExtendedReply(vec![]).packet_type(), 201);
     }
 
@@ -472,7 +556,11 @@ mod tests {
     fn rename_sends_from_before_to() {
         // Mutation: swap the two `w.string` calls. Renaming then moves the wrong way, and against a
         // real server it usually *succeeds* — which is why this is asserted on the bytes.
-        let bytes = Request::Rename { from: b"a".to_vec(), to: b"bb".to_vec() }.encode(1);
+        let bytes = Request::Rename {
+            from: b"a".to_vec(),
+            to: b"bb".to_vec(),
+        }
+        .encode(1);
         assert_eq!(&bytes[9..14], &[0, 0, 0, 1, b'a']);
         assert_eq!(&bytes[14..20], &[0, 0, 0, 2, b'b', b'b']);
     }
@@ -481,12 +569,15 @@ mod tests {
     fn an_extended_request_frames_its_payload_after_the_name_without_a_prefix() {
         // Mutation: `w.string(data)` for `w.raw(data)` — the payload gains a length prefix, and an
         // extension with fields (e.g. `statvfs@`'s path) is misread by every server.
-        let bytes =
-            Request::Extended { name: b"x@y".to_vec(), data: vec![0, 0, 0, 1, b'/'] }.encode(2);
+        let bytes = Request::Extended {
+            name: b"x@y".to_vec(),
+            data: vec![0, 0, 0, 1, b'/'],
+        }
+        .encode(2);
         assert_eq!(
             bytes,
             [
-                0, 0, 0, 17, // length: 1 type + 4 id + 4 + 3 name + 5 payload
+                0, 0, 0, 17,  // length: 1 type + 4 id + 4 + 3 name + 5 payload
                 200, // SSH_FXP_EXTENDED
                 0, 0, 0, 2, // id
                 0, 0, 0, 3, b'x', b'@', b'y', // name
@@ -501,7 +592,10 @@ mod tests {
         // length and the body lost.
         let body = [0, 0, 0, 0, 0, 4, 0, 0, 0xAB];
         let mut r = Reader::new(&body);
-        assert_eq!(Response::decode(201, &mut r).unwrap(), Response::ExtendedReply(body.to_vec()));
+        assert_eq!(
+            Response::decode(201, &mut r).unwrap(),
+            Response::ExtendedReply(body.to_vec())
+        );
         assert!(r.is_empty());
     }
 
@@ -515,10 +609,18 @@ mod tests {
         }
         let l = decode_limits(&body).unwrap();
         assert_eq!(
-            (l.max_packet_len, l.max_read_len, l.max_write_len, l.max_open_handles),
+            (
+                l.max_packet_len,
+                l.max_read_len,
+                l.max_write_len,
+                l.max_open_handles
+            ),
             (262_144, 261_120, 261_000, 1_019)
         );
-        assert!(decode_limits(&body[..20]).is_err(), "a short body is an error, not zeros");
+        assert!(
+            decode_limits(&body[..20]).is_err(),
+            "a short body is an error, not zeros"
+        );
     }
 
     #[test]

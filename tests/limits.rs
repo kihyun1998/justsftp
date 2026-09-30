@@ -133,18 +133,28 @@ fn spawn_server(mut side: tokio::io::DuplexStream, advertise: bool, answer: Answ
 }
 
 fn config() -> Config {
-    Config { request_timeout: Duration::from_secs(2), ..Config::default() }
+    Config {
+        request_timeout: Duration::from_secs(2),
+        ..Config::default()
+    }
 }
 
 async fn connect(advertise: bool, answer: Answer) -> (Session, Seen) {
     let (client_side, server_side) = tokio::io::duplex(1024 * 1024);
     let seen = spawn_server(server_side, advertise, answer);
-    let session = Session::open(client_side, config()).await.expect("handshake");
+    let session = Session::open(client_side, config())
+        .await
+        .expect("handshake");
     (session, seen)
 }
 
 fn limits(packet: u64, read: u64, write: u64) -> Answer {
-    Answer::Reply(Limits { packet, read, write, handles: 0 })
+    Answer::Reply(Limits {
+        packet,
+        read,
+        write,
+        handles: 0,
+    })
 }
 
 /// The chunk a default session hands out for a 4-byte handle: 262,144 − 25 − 4.
@@ -209,10 +219,19 @@ async fn a_write_past_the_server_s_length_is_refused_before_it_is_sent() {
     w.close().await.expect("close");
 
     assert!(
-        matches!(refused, Err(justsftp::Error::TooLong { len: 40_001, limit: 40_000 })),
+        matches!(
+            refused,
+            Err(justsftp::Error::TooLong {
+                len: 40_001,
+                limit: 40_000
+            })
+        ),
         "expected TooLong, got {refused:?}"
     );
-    assert!(write_lens(&seen).is_empty(), "the oversized write reached the server");
+    assert!(
+        write_lens(&seen).is_empty(),
+        "the oversized write reached the server"
+    );
 }
 
 #[tokio::test]
@@ -256,12 +275,22 @@ async fn a_tiny_limit_still_lets_a_transfer_make_progress() {
 
 #[tokio::test]
 async fn the_server_s_answer_is_reported_as_it_was_stated() {
-    let answer = Limits { packet: 34_000, read: 32_768, write: 32_000, handles: 1_019 };
+    let answer = Limits {
+        packet: 34_000,
+        read: 32_768,
+        write: 32_000,
+        handles: 1_019,
+    };
     let (session, _seen) = connect(true, Answer::Reply(answer)).await;
 
     let got = session.server_limits().expect("limits were answered");
     assert_eq!(
-        (got.max_packet_len, got.max_read_len, got.max_write_len, got.max_open_handles),
+        (
+            got.max_packet_len,
+            got.max_read_len,
+            got.max_write_len,
+            got.max_open_handles
+        ),
         (34_000, 32_768, 32_000, 1_019)
     );
 }
@@ -296,7 +325,10 @@ async fn the_request_names_the_extension_and_carries_nothing_else() {
 
 async fn assert_falls_back(answer: Answer) {
     let (session, _seen) = connect(true, answer).await;
-    let w = session.write_file(b"/srv/out.bin").await.expect("the session is still usable");
+    let w = session
+        .write_file(b"/srv/out.bin")
+        .await
+        .expect("the session is still usable");
     let chunk = w.max_chunk();
     w.close().await.expect("close");
 
@@ -343,5 +375,8 @@ async fn a_link_that_dies_during_the_query_fails_the_open() {
     });
 
     let opened = Session::open(client_side, config()).await;
-    assert!(opened.is_err(), "the open reported success over a closed link");
+    assert!(
+        opened.is_err(),
+        "the open reported success over a closed link"
+    );
 }

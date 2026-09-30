@@ -211,7 +211,10 @@ impl Session {
         if !self.server.advertises(LIMITS_EXTENSION) {
             return Ok(None);
         }
-        let req = Request::Extended { name: LIMITS_EXTENSION.to_vec(), data: Vec::new() };
+        let req = Request::Extended {
+            name: LIMITS_EXTENSION.to_vec(),
+            data: Vec::new(),
+        };
         match self.request(req).await {
             Ok(Response::ExtendedReply(body)) => Ok(decode_limits(&body).ok()),
             Err(e @ (Error::Eof | Error::SessionEnded { .. } | Error::WriteTimeout)) => Err(e),
@@ -232,7 +235,10 @@ impl Session {
 
         let (ty, body) = read_packet(&mut stream, config.max_inbound_packet).await?;
         if ty != packet::VERSION {
-            return Err(Error::UnexpectedReply { expected: "VERSION", got: ty });
+            return Err(Error::UnexpectedReply {
+                expected: "VERSION",
+                got: ty,
+            });
         }
         let server = decode_version(&mut Reader::new(&body))?;
 
@@ -242,7 +248,10 @@ impl Session {
         // while hard-coding v3, so against a v2 server every status packet is over-read. Refusing
         // here is what lets `Response::decode` read them without a version check.
         if server.version != VERSION {
-            return Err(Error::UnsupportedVersion { theirs: server.version, ours: VERSION });
+            return Err(Error::UnsupportedVersion {
+                theirs: server.version,
+                ours: VERSION,
+            });
         }
         Ok((stream, server))
     }
@@ -356,7 +365,10 @@ impl Session {
             }
             pending.insert(id, reply_tx);
         }
-        let slot = Slot { pending: Arc::clone(&self.pending), id };
+        let slot = Slot {
+            pending: Arc::clone(&self.pending),
+            id,
+        };
 
         let bytes = req.encode(id);
 
@@ -383,7 +395,13 @@ impl Session {
         //    transfer part way is a supported operation, so this had to be right here.
         let (written_tx, written_rx) = oneshot::channel();
         let outbound = self.outbound.as_ref().ok_or(Error::Eof)?;
-        if outbound.send(Outbound { bytes, written: written_tx }).is_err() {
+        if outbound
+            .send(Outbound {
+                bytes,
+                written: written_tx,
+            })
+            .is_err()
+        {
             return Err(Error::Eof);
         }
 
@@ -512,7 +530,10 @@ async fn read_packet<R: AsyncRead + Unpin>(rd: &mut R, max: usize) -> Result<(u8
         return Err(Error::Truncated { needed: 1, had: 0 });
     }
     if len > max {
-        return Err(Error::TooLong { len: len as u64, limit: max as u64 });
+        return Err(Error::TooLong {
+            len: len as u64,
+            limit: max as u64,
+        });
     }
 
     let mut ty = [0u8; 1];
@@ -585,6 +606,8 @@ async fn read_loop<R: AsyncRead + Unpin>(
     let cause = Arc::new(cause);
     let mut pending = lock(&pending);
     for (_, tx) in pending.drain() {
-        let _ = tx.send(Err(Error::SessionEnded { cause: Arc::clone(&cause) }));
+        let _ = tx.send(Err(Error::SessionEnded {
+            cause: Arc::clone(&cause),
+        }));
     }
 }

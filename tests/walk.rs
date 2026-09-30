@@ -115,11 +115,9 @@ fn spawn_server(
         read_frame(&mut side).await; // INIT
         side.write_all(VERSION_REPLY).await.unwrap();
         loop {
-            let Ok(frame) = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                read_frame(&mut side),
-            )
-            .await
+            let Ok(frame) =
+                tokio::time::timeout(std::time::Duration::from_secs(5), read_frame(&mut side))
+                    .await
             else {
                 return;
             };
@@ -150,7 +148,9 @@ fn spawn_server(
 async fn connect(batches: usize, per_batch: u32) -> (Session, Arc<Observed>) {
     let (client_side, server_side) = tokio::io::duplex(64 * 1024);
     let seen = spawn_server(server_side, batches, per_batch);
-    let session = Session::open(client_side, Config::default()).await.expect("handshake");
+    let session = Session::open(client_side, Config::default())
+        .await
+        .expect("handshake");
     (session, seen)
 }
 
@@ -181,14 +181,23 @@ async fn a_watched_walk_hands_on_each_batch_as_it_lands() {
     let mut batches: Vec<Vec<String>> = Vec::new();
     session
         .list_dir_watched(b"/var/log", &mut |batch, _| {
-            batches.push(batch.iter().map(|e| String::from_utf8_lossy(&e.filename).into_owned()).collect());
+            batches.push(
+                batch
+                    .iter()
+                    .map(|e| String::from_utf8_lossy(&e.filename).into_owned())
+                    .collect(),
+            );
             Walk::Continue
         })
         .await
         .expect("listing");
 
     // Each call carries only what that round trip brought, never the running whole.
-    let batch = |b: usize| (0..4).map(|i| format!("b{b}-f{i}")).collect::<Vec<String>>();
+    let batch = |b: usize| {
+        (0..4)
+            .map(|i| format!("b{b}-f{i}"))
+            .collect::<Vec<String>>()
+    };
     assert_eq!(batches, vec![batch(0), batch(1), batch(2)]);
 }
 
@@ -229,7 +238,11 @@ async fn stopping_stops_asking() {
         .await
         .expect("listing");
 
-    assert_eq!(seen.readdirs.load(Ordering::SeqCst), 2, "asked for more batches after Stop");
+    assert_eq!(
+        seen.readdirs.load(Ordering::SeqCst),
+        2,
+        "asked for more batches after Stop"
+    );
 }
 
 #[tokio::test]
@@ -244,7 +257,10 @@ async fn a_stopped_walk_still_closes_the_handle() {
         .await
         .expect("listing");
 
-    assert!(seen.closed.load(Ordering::SeqCst), "the handle was left open");
+    assert!(
+        seen.closed.load(Ordering::SeqCst),
+        "the handle was left open"
+    );
 }
 
 #[tokio::test]

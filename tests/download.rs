@@ -136,7 +136,8 @@ fn spawn_server(mut side: tokio::io::DuplexStream, script: Vec<usize>) -> Arc<Ob
         side.write_all(VERSION_REPLY).await.unwrap();
         loop {
             let Ok(frame) =
-                tokio::time::timeout(std::time::Duration::from_secs(5), read_frame(&mut side)).await
+                tokio::time::timeout(std::time::Duration::from_secs(5), read_frame(&mut side))
+                    .await
             else {
                 return;
             };

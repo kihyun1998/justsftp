@@ -115,7 +115,8 @@ fn spawn_server(mut side: tokio::io::DuplexStream) -> Arc<Observed> {
         side.write_all(VERSION_REPLY).await.unwrap();
         loop {
             let Ok(frame) =
-                tokio::time::timeout(std::time::Duration::from_secs(5), read_frame(&mut side)).await
+                tokio::time::timeout(std::time::Duration::from_secs(5), read_frame(&mut side))
+                    .await
             else {
                 return;
             };
@@ -124,7 +125,8 @@ fn spawn_server(mut side: tokio::io::DuplexStream) -> Arc<Observed> {
             match kind {
                 3 => {
                     // OPEN: id(4) · path(4+n) · flags(4) · attrs
-                    let path_len = u32::from_be_bytes([body[4], body[5], body[6], body[7]]) as usize;
+                    let path_len =
+                        u32::from_be_bytes([body[4], body[5], body[6], body[7]]) as usize;
                     let f = &body[8 + path_len..];
                     *seen.opened_flags.lock().expect("flags") =
                         Some(u32::from_be_bytes([f[0], f[1], f[2], f[3]]));
@@ -353,10 +355,16 @@ async fn a_chunk_at_the_advertised_ceiling_is_accepted() {
     let mut w = session.write_file(b"/srv/out.bin").await.expect("open");
 
     let n = w.max_chunk();
-    w.write(&vec![0xAB; n]).await.expect("a chunk at the ceiling must fit");
+    w.write(&vec![0xAB; n])
+        .await
+        .expect("a chunk at the ceiling must fit");
     w.close().await.expect("close");
 
-    assert_eq!(seen.assembled().len(), n, "the server did not receive the whole chunk");
+    assert_eq!(
+        seen.assembled().len(),
+        n,
+        "the server did not receive the whole chunk"
+    );
 }
 
 /// One byte more does not. Without this, an off-by-one that made `max_chunk()` *smaller* would go

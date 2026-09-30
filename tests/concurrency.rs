@@ -57,11 +57,19 @@ async fn two_requests_in_flight_are_answered_out_of_order_and_each_caller_gets_i
         // ⚠️ **Answered in reverse.** A server is under no obligation to reply in order, and a
         // client that assumes it will hands each caller the other one's answer. Replying in order
         // would let a first-in-first-out implementation pass.
-        server_side.write_all(&attrs_reply(id_b, 222)).await.unwrap();
-        server_side.write_all(&attrs_reply(id_a, 111)).await.unwrap();
+        server_side
+            .write_all(&attrs_reply(id_b, 222))
+            .await
+            .unwrap();
+        server_side
+            .write_all(&attrs_reply(id_a, 111))
+            .await
+            .unwrap();
     });
 
-    let session = Session::open(client_side, Config::default()).await.expect("handshake");
+    let session = Session::open(client_side, Config::default())
+        .await
+        .expect("handshake");
 
     // Mutation that reddens this: in `read_loop`, ignore the decoded id and instead pop any waiter
     // out of the map. Each caller then receives the other's size and both assertions fail.
@@ -101,7 +109,10 @@ async fn the_timeout_measures_the_wait_for_a_reply_and_not_the_wait_to_send() {
         server_side.write_all(&attrs_reply(id, 7)).await.unwrap();
     });
 
-    let config = Config { request_timeout: Duration::from_secs(3), ..Config::default() };
+    let config = Config {
+        request_timeout: Duration::from_secs(3),
+        ..Config::default()
+    };
     let session = Session::open(client_side, config).await.expect("handshake");
 
     let attrs = session
@@ -123,7 +134,10 @@ async fn a_server_that_never_answers_produces_a_timeout_rather_than_hanging() {
         tokio::time::sleep(Duration::from_secs(3600)).await;
     });
 
-    let config = Config { request_timeout: Duration::from_secs(3), ..Config::default() };
+    let config = Config {
+        request_timeout: Duration::from_secs(3),
+        ..Config::default()
+    };
     let session = Session::open(client_side, config).await.expect("handshake");
 
     match session.stat(b"/never").await {
@@ -148,7 +162,10 @@ async fn a_handshake_the_server_never_completes_times_out_rather_than_hanging() 
         tokio::time::sleep(Duration::from_secs(3600)).await;
     });
 
-    let config = Config { request_timeout: Duration::from_secs(3), ..Config::default() };
+    let config = Config {
+        request_timeout: Duration::from_secs(3),
+        ..Config::default()
+    };
     match Session::open(client_side, config).await {
         Err(Error::Timeout) => {}
         other => panic!("expected Timeout from the handshake, got {other:?}"),
@@ -222,7 +239,9 @@ async fn a_cancelled_request_does_not_leave_half_a_packet_on_the_wire() {
         (t1, id_and_path(&b1).1, t2, path2)
     });
 
-    let session = Session::open(client_side, Config::default()).await.expect("handshake");
+    let session = Session::open(client_side, Config::default())
+        .await
+        .expect("handshake");
 
     // ⚠️ **The path is 2000 bytes on purpose, and a short one made this test unable to fail.**
     // Through an 8-byte pipe a ~50-byte packet finishes its write before the drop below is
@@ -243,7 +262,10 @@ async fn a_cancelled_request_does_not_leave_half_a_packet_on_the_wire() {
         drop(doomed);
     }
 
-    let survived = session.stat(b"/second").await.expect("the stream must still be framed");
+    let survived = session
+        .stat(b"/second")
+        .await
+        .expect("the stream must still be framed");
     assert_eq!(survived.size, Some(5));
 
     let (t1, p1, t2, p2) = server.await.unwrap();
@@ -328,7 +350,9 @@ async fn a_write_failure_reaches_the_requests_queued_behind_it() {
         drop(server_writes);
     });
 
-    let session = Session::open(client_side, Config::default()).await.expect("handshake");
+    let session = Session::open(client_side, Config::default())
+        .await
+        .expect("handshake");
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // `join!` polls both in one pass, and `enqueue` is synchronous up to its first await, so both
@@ -336,11 +360,16 @@ async fn a_write_failure_reaches_the_requests_queued_behind_it() {
     // one behind it.
     let (first, second) = tokio::join!(session.stat(b"/one"), session.stat(b"/two"));
 
-    for (label, outcome) in [("the write that failed", first), ("the one queued behind it", second)]
-    {
+    for (label, outcome) in [
+        ("the write that failed", first),
+        ("the one queued behind it", second),
+    ] {
         match outcome {
             Err(Error::SessionEnded { cause }) => {
-                assert!(matches!(&*cause, Error::Io(_)), "{label}: expected an io cause, got {cause:?}");
+                assert!(
+                    matches!(&*cause, Error::Io(_)),
+                    "{label}: expected an io cause, got {cause:?}"
+                );
             }
             other => panic!("{label}: expected SessionEnded with a real cause, got {other:?}"),
         }
@@ -368,8 +397,14 @@ async fn a_cancelled_request_reclaims_its_slot_in_the_pending_map() {
         }
     });
 
-    let session = Session::open(client_side, Config::default()).await.expect("handshake");
-    assert_eq!(session.in_flight(), 0, "nothing outstanding before we start");
+    let session = Session::open(client_side, Config::default())
+        .await
+        .expect("handshake");
+    assert_eq!(
+        session.in_flight(),
+        0,
+        "nothing outstanding before we start"
+    );
 
     for _ in 0..3 {
         let mut doomed = Box::pin(session.stat(b"/never-answered"));
@@ -378,9 +413,17 @@ async fn a_cancelled_request_reclaims_its_slot_in_the_pending_map() {
             _ = &mut doomed => panic!("the server answers nothing"),
             _ = tokio::time::sleep(Duration::from_millis(10)) => {}
         }
-        assert_eq!(session.in_flight(), 1, "registered while the request is live");
+        assert_eq!(
+            session.in_flight(),
+            1,
+            "registered while the request is live"
+        );
         drop(doomed);
-        assert_eq!(session.in_flight(), 0, "and reclaimed the moment the caller goes away");
+        assert_eq!(
+            session.in_flight(),
+            0,
+            "and reclaimed the moment the caller goes away"
+        );
     }
 
     server.abort();
@@ -405,7 +448,9 @@ async fn close_drains_the_queue_rather_than_discarding_it() {
         (t, id_and_path(&b).1)
     });
 
-    let session = Session::open(client_side, Config::default()).await.expect("handshake");
+    let session = Session::open(client_side, Config::default())
+        .await
+        .expect("handshake");
     let queued = vec![b'q'; 2000];
     {
         let mut abandoned = Box::pin(session.stat(&queued));
@@ -447,9 +492,14 @@ async fn a_reply_carrying_an_id_nobody_is_waiting_on_does_not_kill_the_session()
         server_side.write_all(&attrs_reply(id, 3)).await.unwrap();
     });
 
-    let session = Session::open(client_side, Config::default()).await.expect("handshake");
+    let session = Session::open(client_side, Config::default())
+        .await
+        .expect("handshake");
     assert_eq!(session.stat(b"/one").await.expect("first").size, Some(1));
-    assert_eq!(session.stat(b"/two").await.expect("after the stray").size, Some(3));
+    assert_eq!(
+        session.stat(b"/two").await.expect("after the stray").size,
+        Some(3)
+    );
     server.await.unwrap();
 }
 
@@ -473,11 +523,17 @@ async fn an_oversized_packet_on_the_reader_path_is_refused_and_the_reason_reache
         read_frame(&mut server_side).await;
         // A header declaring 1 MiB against a 4 KiB ceiling. 1 MiB rather than 4 GiB so that
         // removing the check is safe to run as a mutation rather than allocating four gigabytes.
-        server_side.write_all(&[0x00, 0x10, 0x00, 0x00, 0x69]).await.unwrap();
+        server_side
+            .write_all(&[0x00, 0x10, 0x00, 0x00, 0x69])
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_secs(3600)).await;
     });
 
-    let config = Config { max_inbound_packet: 4096, ..Config::default() };
+    let config = Config {
+        max_inbound_packet: 4096,
+        ..Config::default()
+    };
     let session = Session::open(client_side, config).await.expect("handshake");
 
     // ⚠️ **Two requests, not one, and that is the whole strength of this test.** With a single
@@ -494,7 +550,10 @@ async fn an_oversized_packet_on_the_reader_path_is_refused_and_the_reason_reache
     for (label, outcome) in [("first", a), ("second", b)] {
         match outcome {
             Err(Error::SessionEnded { cause }) => match &*cause {
-                Error::TooLong { len: 1_048_576, limit: 4096 } => {}
+                Error::TooLong {
+                    len: 1_048_576,
+                    limit: 4096,
+                } => {}
                 other => panic!("{label}: expected TooLong as the cause, got {other:?}"),
             },
             other => panic!("{label}: expected SessionEnded, got {other:?}"),
@@ -517,7 +576,9 @@ async fn a_stream_that_ends_fails_the_waiting_requests_instead_of_leaving_them_t
         drop(server_side); // the far end goes away mid-request
     });
 
-    let session = Session::open(client_side, Config::default()).await.expect("handshake");
+    let session = Session::open(client_side, Config::default())
+        .await
+        .expect("handshake");
     match session.stat(b"/gone").await {
         Err(Error::SessionEnded { cause }) => assert!(
             matches!(&*cause, Error::Eof),
@@ -561,7 +622,10 @@ async fn a_request_issued_after_the_reader_died_fails_at_once_rather_than_waitin
         drop(server_reads);
     });
 
-    let config = Config { request_timeout: Duration::from_secs(30), ..Config::default() };
+    let config = Config {
+        request_timeout: Duration::from_secs(30),
+        ..Config::default()
+    };
     let session = Session::open(client_side, config).await.expect("handshake");
 
     // Let the reader observe the end of its half.
@@ -571,7 +635,10 @@ async fn a_request_issued_after_the_reader_died_fails_at_once_rather_than_waitin
     let outcome = session.stat(b"/after-the-reader-died").await;
     let waited = started.elapsed();
 
-    assert!(matches!(outcome, Err(Error::Eof)), "expected a fast Eof, got {outcome:?}");
+    assert!(
+        matches!(outcome, Err(Error::Eof)),
+        "expected a fast Eof, got {outcome:?}"
+    );
     assert!(
         waited < Duration::from_secs(30),
         "it must not spend the reply budget on a connection already known to be gone: {waited:?}"

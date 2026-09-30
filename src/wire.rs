@@ -45,7 +45,10 @@ impl<'a> Reader<'a> {
     /// is one byte short say so.
     fn take(&mut self, n: usize) -> Result<&'a [u8]> {
         if self.remaining() < n {
-            return Err(Error::Truncated { needed: n, had: self.remaining() });
+            return Err(Error::Truncated {
+                needed: n,
+                had: self.remaining(),
+            });
         }
         let out = &self.buf[self.pos..self.pos + n];
         self.pos += n;
@@ -59,7 +62,9 @@ impl<'a> Reader<'a> {
 
     pub(crate) fn u64(&mut self) -> Result<u64> {
         let b = self.take(8)?;
-        Ok(u64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
+        Ok(u64::from_be_bytes([
+            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+        ]))
     }
 
     /// An SSH `string`: a `u32` count and then exactly that many bytes, handed back **as bytes**.
@@ -162,7 +167,10 @@ mod tests {
         // assertion on purpose, so the fixture's own precondition is stated in the test.
         let owned: Vec<u8> = vec![0xC7, 0xD1, 0xB1, 0xDB, 0x2E, 0x74, 0x78, 0x74];
         let raw: &[u8] = &owned;
-        assert!(std::str::from_utf8(raw).is_err(), "fixture must not be valid UTF-8");
+        assert!(
+            std::str::from_utf8(raw).is_err(),
+            "fixture must not be valid UTF-8"
+        );
 
         let mut w = Writer::new();
         w.string(raw);
@@ -233,9 +241,16 @@ mod tests {
         let buf = w.into_inner();
 
         let mut as_text = Reader::new(&buf);
-        assert!(as_text.text().unwrap().contains('\u{FFFD}'), "text may lose bytes");
+        assert!(
+            as_text.text().unwrap().contains('\u{FFFD}'),
+            "text may lose bytes"
+        );
 
         let mut as_bytes = Reader::new(&buf);
-        assert_eq!(as_bytes.string().unwrap(), invalid.to_vec(), "a string may not");
+        assert_eq!(
+            as_bytes.string().unwrap(),
+            invalid.to_vec(),
+            "a string may not"
+        );
     }
 }

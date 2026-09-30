@@ -59,15 +59,25 @@ impl Session {
     /// in § 6.11, and `russh-sftp` has a `FileAttributes::dummy()` constructor for exactly this.
     /// Only the filename is meaningful, which is why this returns bytes and not a `DirEntry`.
     pub async fn real_path(&self, path: &[u8]) -> Result<Vec<u8>> {
-        let mut names = self.expect_name(Request::RealPath { path: path.to_vec() }).await?;
+        let mut names = self
+            .expect_name(Request::RealPath {
+                path: path.to_vec(),
+            })
+            .await?;
         if names.is_empty() {
-            return Err(Error::UnexpectedReply { expected: "NAME with one entry", got: 104 });
+            return Err(Error::UnexpectedReply {
+                expected: "NAME with one entry",
+                got: 104,
+            });
         }
         Ok(names.remove(0).filename)
     }
 
     pub async fn open_dir(&self, path: &[u8]) -> Result<Handle> {
-        self.expect_handle(Request::OpenDir { path: path.to_vec() }).await
+        self.expect_handle(Request::OpenDir {
+            path: path.to_vec(),
+        })
+        .await
     }
 
     /// One batch of directory entries. `Ok(None)` is the server saying there are no more.
@@ -76,7 +86,12 @@ impl Session {
     /// is not a listing. `Eof` arrives as a `STATUS`, not as an empty `NAME`, which is why the
     /// signature is an `Option` rather than a `Vec` that happens to be empty.
     pub async fn read_dir(&self, handle: &Handle) -> Result<Option<Vec<DirEntry>>> {
-        match self.request(Request::ReadDir { handle: handle.clone() }).await {
+        match self
+            .request(Request::ReadDir {
+                handle: handle.clone(),
+            })
+            .await
+        {
             Ok(Response::Name(entries)) => Ok(Some(entries)),
             Ok(Response::Status(s)) if s.code == StatusCode::Eof => Ok(None),
             other => Err(unexpected("NAME", other)),
@@ -89,7 +104,9 @@ impl Session {
     /// whether to draw them is the consumer's — this crate addresses files, it does not present
     /// them.
     pub async fn list_dir(&self, path: &[u8]) -> Result<Vec<DirEntry>> {
-        self.list_dir_watched(path, &mut |_, _| Walk::Continue).await.map(|l| l.entries)
+        self.list_dir_watched(path, &mut |_, _| Walk::Continue)
+            .await
+            .map(|l| l.entries)
     }
 
     /// The same walk, with the caller told after every batch and able to end it.
@@ -145,7 +162,10 @@ impl Session {
         let closed = self.close_handle(&handle).await;
         walk?;
         closed?;
-        Ok(Listing { entries: all, stopped })
+        Ok(Listing {
+            entries: all,
+            stopped,
+        })
     }
 
     /// Opens a file.
@@ -166,7 +186,12 @@ impl Session {
         flags: OpenFlags,
         attrs: AttrsUpdate,
     ) -> Result<Handle> {
-        self.expect_handle(Request::Open { path: path.to_vec(), flags, attrs }).await
+        self.expect_handle(Request::Open {
+            path: path.to_vec(),
+            flags,
+            attrs,
+        })
+        .await
     }
 
     /// Reads at an offset. `Ok(None)` is end of file.
@@ -175,7 +200,14 @@ impl Session {
     /// files in § 6.4 — *"this may return fewer bytes than requested"* — so a caller that treats
     /// `data.len() < len` as EOF truncates. Loop until this returns `None`.
     pub async fn read(&self, handle: &Handle, offset: u64, len: u32) -> Result<Option<Vec<u8>>> {
-        match self.request(Request::Read { handle: handle.clone(), offset, len }).await {
+        match self
+            .request(Request::Read {
+                handle: handle.clone(),
+                offset,
+                len,
+            })
+            .await
+        {
             Ok(Response::Data(data)) => Ok(Some(data)),
             Ok(Response::Status(s)) if s.code == StatusCode::Eof => Ok(None),
             other => Err(unexpected("DATA", other)),
@@ -240,7 +272,12 @@ impl Session {
     /// offset was supposed to mean.
     pub async fn read_file_from(&self, path: &[u8], offset: u64) -> Result<ReadFile<'_>> {
         let handle = self.open_file(path, OpenFlags::READ).await?;
-        Ok(ReadFile { session: self, handle, offset, closed: false })
+        Ok(ReadFile {
+            session: self,
+            handle,
+            offset,
+            closed: false,
+        })
     }
 
     pub async fn read_file_watched(
@@ -269,9 +306,11 @@ impl Session {
         let closed = open.close().await;
         walk?;
         closed?;
-        Ok(Download { bytes: read, stopped })
+        Ok(Download {
+            bytes: read,
+            stopped,
+        })
     }
-
 }
 
 /// A file open for reading on the server, **driven by the caller**.
@@ -495,7 +534,12 @@ impl Session {
                 OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE,
             )
             .await?;
-        Ok(WriteFile { session: self, handle, offset: 0, closed: false })
+        Ok(WriteFile {
+            session: self,
+            handle,
+            offset: 0,
+            closed: false,
+        })
     }
 
     /// Opens an **existing** file for writing, truncated: `WRITE | TRUNCATE` without `CREATE`, so a
@@ -505,7 +549,12 @@ impl Session {
         let handle = self
             .open_file(path, OpenFlags::WRITE | OpenFlags::TRUNCATE)
             .await?;
-        Ok(WriteFile { session: self, handle, offset: 0, closed: false })
+        Ok(WriteFile {
+            session: self,
+            handle,
+            offset: 0,
+            closed: false,
+        })
     }
 
     /// Opens a file for writing and **continues from `offset`, keeping what is already there**.
@@ -528,7 +577,12 @@ impl Session {
         let handle = self
             .open_file(path, OpenFlags::WRITE | OpenFlags::CREATE)
             .await?;
-        Ok(WriteFile { session: self, handle, offset, closed: false })
+        Ok(WriteFile {
+            session: self,
+            handle,
+            offset,
+            closed: false,
+        })
     }
 
     pub async fn write_file_watched(
@@ -560,7 +614,10 @@ impl Session {
         let closed = open.close().await;
         walk?;
         closed?;
-        Ok(Upload { bytes: written, stopped })
+        Ok(Upload {
+            bytes: written,
+            stopped,
+        })
     }
 }
 
@@ -570,7 +627,10 @@ impl Session {
         // server's own write bound, which only a write has.
         if let Some(limit) = self.server_write_len(handle.as_bytes().len()) {
             if data.len() > limit {
-                return Err(Error::TooLong { len: data.len() as u64, limit: limit as u64 });
+                return Err(Error::TooLong {
+                    len: data.len() as u64,
+                    limit: limit as u64,
+                });
             }
         }
         self.expect_ok(Request::Write {
@@ -582,22 +642,34 @@ impl Session {
     }
 
     pub async fn close_handle(&self, handle: &Handle) -> Result<()> {
-        self.expect_ok(Request::Close { handle: handle.clone() }).await
+        self.expect_ok(Request::Close {
+            handle: handle.clone(),
+        })
+        .await
     }
 
     /// Follows symlinks.
     pub async fn stat(&self, path: &[u8]) -> Result<FileAttributes> {
-        self.expect_attrs(Request::Stat { path: path.to_vec() }).await
+        self.expect_attrs(Request::Stat {
+            path: path.to_vec(),
+        })
+        .await
     }
 
     /// Does **not** follow symlinks — this is the one a directory listing wants, because it is what
     /// makes a link report as a link.
     pub async fn lstat(&self, path: &[u8]) -> Result<FileAttributes> {
-        self.expect_attrs(Request::LStat { path: path.to_vec() }).await
+        self.expect_attrs(Request::LStat {
+            path: path.to_vec(),
+        })
+        .await
     }
 
     pub async fn fstat(&self, handle: &Handle) -> Result<FileAttributes> {
-        self.expect_attrs(Request::FStat { handle: handle.clone() }).await
+        self.expect_attrs(Request::FStat {
+            handle: handle.clone(),
+        })
+        .await
     }
 
     /// Changes attributes. An empty update is refused rather than sent.
@@ -609,37 +681,66 @@ impl Session {
         if attrs.is_empty() {
             return Ok(());
         }
-        self.expect_ok(Request::SetStat { path: path.to_vec(), attrs }).await
+        self.expect_ok(Request::SetStat {
+            path: path.to_vec(),
+            attrs,
+        })
+        .await
     }
 
     pub async fn set_stat_handle(&self, handle: &Handle, attrs: AttrsUpdate) -> Result<()> {
         if attrs.is_empty() {
             return Ok(());
         }
-        self.expect_ok(Request::FSetStat { handle: handle.clone(), attrs }).await
+        self.expect_ok(Request::FSetStat {
+            handle: handle.clone(),
+            attrs,
+        })
+        .await
     }
 
     pub async fn remove(&self, path: &[u8]) -> Result<()> {
-        self.expect_ok(Request::Remove { path: path.to_vec() }).await
+        self.expect_ok(Request::Remove {
+            path: path.to_vec(),
+        })
+        .await
     }
 
     pub async fn rename(&self, from: &[u8], to: &[u8]) -> Result<()> {
-        self.expect_ok(Request::Rename { from: from.to_vec(), to: to.to_vec() }).await
+        self.expect_ok(Request::Rename {
+            from: from.to_vec(),
+            to: to.to_vec(),
+        })
+        .await
     }
 
     pub async fn mkdir(&self, path: &[u8]) -> Result<()> {
-        self.expect_ok(Request::MkDir { path: path.to_vec(), attrs: AttrsUpdate::new() }).await
+        self.expect_ok(Request::MkDir {
+            path: path.to_vec(),
+            attrs: AttrsUpdate::new(),
+        })
+        .await
     }
 
     pub async fn rmdir(&self, path: &[u8]) -> Result<()> {
-        self.expect_ok(Request::RmDir { path: path.to_vec() }).await
+        self.expect_ok(Request::RmDir {
+            path: path.to_vec(),
+        })
+        .await
     }
 
     /// The target of a symlink, as bytes. Creating one is deliberately absent — see [`Request`].
     pub async fn read_link(&self, path: &[u8]) -> Result<Vec<u8>> {
-        let mut names = self.expect_name(Request::ReadLink { path: path.to_vec() }).await?;
+        let mut names = self
+            .expect_name(Request::ReadLink {
+                path: path.to_vec(),
+            })
+            .await?;
         if names.is_empty() {
-            return Err(Error::UnexpectedReply { expected: "NAME with one entry", got: 104 });
+            return Err(Error::UnexpectedReply {
+                expected: "NAME with one entry",
+                got: 104,
+            });
         }
         Ok(names.remove(0).filename)
     }
@@ -681,7 +782,10 @@ impl Session {
 fn unexpected(expected: &'static str, got: Result<Response>) -> Error {
     match got {
         Ok(Response::Status(s)) => Error::Status(s),
-        Ok(other) => Error::UnexpectedReply { expected, got: other.packet_type() },
+        Ok(other) => Error::UnexpectedReply {
+            expected,
+            got: other.packet_type(),
+        },
         Err(e) => e,
     }
 }

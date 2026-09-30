@@ -139,7 +139,10 @@ impl FileAttributes {
             let count = r.u32()?;
             a.extensions.reserve(count.min(64) as usize);
             for _ in 0..count {
-                a.extensions.push(Extension { name: r.string()?, value: r.string()? });
+                a.extensions.push(Extension {
+                    name: r.string()?,
+                    value: r.string()?,
+                });
             }
         }
         Ok(a)
@@ -268,7 +271,11 @@ mod tests {
         // The assertion below goes from 4 bytes to 12 and reddens.
         let mut w = Writer::new();
         AttrsUpdate::new().encode(&mut w);
-        assert_eq!(w.into_inner(), vec![0, 0, 0, 0], "flags word only, no fields");
+        assert_eq!(
+            w.into_inner(),
+            vec![0, 0, 0, 0],
+            "flags word only, no fields"
+        );
     }
 
     #[test]
@@ -278,7 +285,11 @@ mod tests {
         let mut w = Writer::new();
         AttrsUpdate::new().permissions(0o644).encode(&mut w);
         let out = w.into_inner();
-        assert_eq!(&out[..4], &[0, 0, 0, 0x04], "ATTR_PERMISSIONS and nothing else");
+        assert_eq!(
+            &out[..4],
+            &[0, 0, 0, 0x04],
+            "ATTR_PERMISSIONS and nothing else"
+        );
         assert_eq!(out.len(), 8, "flags + one u32; a size would make this 16");
     }
 
@@ -289,7 +300,11 @@ mod tests {
         let mut w = Writer::new();
         AttrsUpdate::new().permissions(0o100_644).encode(&mut w);
         let out = w.into_inner();
-        assert_eq!(&out[4..8], &[0, 0, 0x01, 0xA4], "0o644, with 0o100000 masked off");
+        assert_eq!(
+            &out[4..8],
+            &[0, 0, 0x01, 0xA4],
+            "0o644, with 0o100000 masked off"
+        );
     }
 
     #[test]
@@ -299,7 +314,11 @@ mod tests {
         // Mutation: narrow S_IPERM to 0o777. This reddens.
         let mut w = Writer::new();
         AttrsUpdate::new().permissions(0o6755).encode(&mut w);
-        assert_eq!(&w.into_inner()[4..8], &[0, 0, 0x0D, 0xED], "0o6755 kept whole");
+        assert_eq!(
+            &w.into_inner()[4..8],
+            &[0, 0, 0x0D, 0xED],
+            "0o6755 kept whole"
+        );
     }
 
     #[test]
@@ -309,7 +328,10 @@ mod tests {
         //
         // Mutation: replace `mode & S_IFMT` with a `mode & 0o100_000 != 0` style subset test in
         // `from_mode`. The symlink row then reads Regular and this reddens.
-        let attrs = |mode: u32| FileAttributes { mode: Some(mode), ..Default::default() };
+        let attrs = |mode: u32| FileAttributes {
+            mode: Some(mode),
+            ..Default::default()
+        };
 
         assert_eq!(attrs(0o120_777).file_type(), Some(FileType::Symlink));
         assert_eq!(attrs(0o140_755).file_type(), Some(FileType::Socket));
@@ -334,7 +356,10 @@ mod tests {
         assert_eq!(silent.file_type(), None);
         assert_eq!(silent.permissions(), None);
 
-        let zero = FileAttributes { mode: Some(0), ..Default::default() };
+        let zero = FileAttributes {
+            mode: Some(0),
+            ..Default::default()
+        };
         assert_eq!(zero.file_type(), Some(FileType::Other(0)));
         assert_ne!(zero.file_type(), silent.file_type());
     }
@@ -375,8 +400,18 @@ mod tests {
         let mut r = Reader::new(&buf);
         let a = FileAttributes::decode(&mut r).expect("decode");
         assert_eq!(a.file_type(), Some(FileType::Regular));
-        assert_eq!(a.extensions, vec![Extension { name: b"ab".to_vec(), value: b"cd".to_vec() }]);
-        assert_eq!(r.u32().unwrap(), 0xDEAD_BEEF, "the reader must be aligned on the next field");
+        assert_eq!(
+            a.extensions,
+            vec![Extension {
+                name: b"ab".to_vec(),
+                value: b"cd".to_vec()
+            }]
+        );
+        assert_eq!(
+            r.u32().unwrap(),
+            0xDEAD_BEEF,
+            "the reader must be aligned on the next field"
+        );
     }
 
     #[test]
@@ -384,7 +419,10 @@ mod tests {
         // Mutation: in `encode`, write only `uid` under ATTR_UIDGID. The decode then reads gid out
         // of the following field and everything after it shifts.
         let mut w = Writer::new();
-        AttrsUpdate::new().owner(1000, 1001).times(7, 9).encode(&mut w);
+        AttrsUpdate::new()
+            .owner(1000, 1001)
+            .times(7, 9)
+            .encode(&mut w);
         let a = decode(&w.into_inner());
         assert_eq!((a.uid, a.gid), (Some(1000), Some(1001)));
         assert_eq!((a.atime, a.mtime), (Some(7), Some(9)));

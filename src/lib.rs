@@ -41,8 +41,8 @@ mod session;
 mod wire;
 
 pub use attrs::{AttrsUpdate, Extension, FileAttributes, FileType};
-pub use error::{Error, Result, Status, StatusCode};
 pub use client::{Download, Feed, Listing, ReadFile, Upload, Walk, WriteFile};
+pub use error::{Error, Result, Status, StatusCode};
 pub use protocol::{
     DirEntry, Handle, OpenFlags, Request, Response, ServerLimits, ServerVersion, VERSION,
 };
