@@ -45,21 +45,31 @@ pub(crate) const LIMITS_EXTENSION: &[u8] = b"limits@openssh.com";
 pub struct OpenFlags(u32);
 
 impl OpenFlags {
+    /// Open for reading.
     pub const READ: Self = Self(0x0000_0001);
+    /// Open for writing.
     pub const WRITE: Self = Self(0x0000_0002);
+    /// Every write goes to the end of the file, whatever its offset.
     pub const APPEND: Self = Self(0x0000_0004);
+    /// Create the file if it does not exist.
     pub const CREATE: Self = Self(0x0000_0008);
+    /// Truncate an existing file to zero length. The draft requires `CREATE` with it; OpenSSH's
+    /// server also honours it alone.
     pub const TRUNCATE: Self = Self(0x0000_0010);
+    /// Fail if the file already exists. The draft requires `CREATE` with it.
     pub const EXCLUSIVE: Self = Self(0x0000_0020);
 
+    /// The flags as the wire's `u32`.
     pub const fn bits(self) -> u32 {
         self.0
     }
 
+    /// Both sets of flags; the same as `|`.
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
     }
 
+    /// Whether every flag in `other` is set.
     pub const fn contains(self, other: Self) -> bool {
         // A subset test is right for independent bits; `attrs::FileType` is the case where it is not.
         self.0 & other.0 == other.0
@@ -80,6 +90,7 @@ impl std::ops::BitOr for OpenFlags {
 pub struct Handle(pub Vec<u8>);
 
 impl Handle {
+    /// The token's bytes.
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
@@ -94,6 +105,7 @@ pub struct DirEntry {
     /// text, which matters when `attrs` carries no mode. Bytes, since it contains the filename.
     // Kept, where both reference implementations discard it: docs/map/territory/packets.md.
     pub longname: Vec<u8>,
+    /// The entry's attributes, as far as the server stated them.
     pub attrs: FileAttributes,
 }
 
@@ -102,71 +114,117 @@ pub struct DirEntry {
 // Why SYMLINK is left out: docs/map/territory/packets.md.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
+    /// `SSH_FXP_OPEN`: open a file. Answered with a handle.
     Open {
+        /// The file's path, as bytes.
         path: Vec<u8>,
+        /// How to open it.
         flags: OpenFlags,
+        /// Attributes for a file this creates; empty is fine.
         attrs: AttrsUpdate,
     },
+    /// `SSH_FXP_CLOSE`: release a file or directory handle.
     Close {
+        /// The handle to release.
         handle: Handle,
     },
+    /// `SSH_FXP_READ`: read up to `len` bytes at `offset`. Answered with data or `EOF`.
     Read {
+        /// An open file's handle.
         handle: Handle,
+        /// Where to start, in bytes from the start of the file.
         offset: u64,
+        /// The most bytes to return; the server may return fewer.
         len: u32,
     },
+    /// `SSH_FXP_WRITE`: write `data` at `offset`.
     Write {
+        /// An open file's handle.
         handle: Handle,
+        /// Where to write, in bytes from the start of the file.
         offset: u64,
+        /// The bytes to write.
         data: Vec<u8>,
     },
+    /// `SSH_FXP_LSTAT`: a path's attributes, not following a symlink.
     LStat {
+        /// The path, as bytes.
         path: Vec<u8>,
     },
+    /// `SSH_FXP_FSTAT`: an open file's attributes.
     FStat {
+        /// An open file's handle.
         handle: Handle,
     },
+    /// `SSH_FXP_SETSTAT`: change a path's attributes.
     SetStat {
+        /// The path, as bytes.
         path: Vec<u8>,
+        /// What to change.
         attrs: AttrsUpdate,
     },
+    /// `SSH_FXP_FSETSTAT`: change an open file's attributes.
     FSetStat {
+        /// An open file's handle.
         handle: Handle,
+        /// What to change.
         attrs: AttrsUpdate,
     },
+    /// `SSH_FXP_OPENDIR`: open a directory for listing. Answered with a handle.
     OpenDir {
+        /// The directory's path, as bytes.
         path: Vec<u8>,
     },
+    /// `SSH_FXP_READDIR`: the next batch of a directory's entries, or `EOF`.
     ReadDir {
+        /// An open directory's handle.
         handle: Handle,
     },
+    /// `SSH_FXP_REMOVE`: delete a file.
     Remove {
+        /// The file's path, as bytes.
         path: Vec<u8>,
     },
+    /// `SSH_FXP_MKDIR`: create a directory.
     MkDir {
+        /// The new directory's path, as bytes.
         path: Vec<u8>,
+        /// Attributes for the new directory; empty is fine.
         attrs: AttrsUpdate,
     },
+    /// `SSH_FXP_RMDIR`: delete an empty directory.
     RmDir {
+        /// The directory's path, as bytes.
         path: Vec<u8>,
     },
+    /// `SSH_FXP_REALPATH`: canonicalise a path. Answered with one name.
     RealPath {
+        /// The path, as bytes; `.` is the home directory.
         path: Vec<u8>,
     },
+    /// `SSH_FXP_STAT`: a path's attributes, following a symlink.
     Stat {
+        /// The path, as bytes.
         path: Vec<u8>,
     },
+    /// `SSH_FXP_RENAME`: move `from` to `to`.
     Rename {
+        /// The current path, as bytes.
         from: Vec<u8>,
+        /// The new path, as bytes.
         to: Vec<u8>,
     },
+    /// `SSH_FXP_READLINK`: a symlink's target. Answered with one name.
     ReadLink {
+        /// The symlink's path, as bytes.
         path: Vec<u8>,
     },
     /// `SSH_FXP_EXTENDED`: the extension's name, then its request-specific fields already encoded.
     /// The fields carry no length prefix of their own — each extension defines its own layout.
     Extended {
+        /// The extension's name, such as `limits@openssh.com`.
         name: Vec<u8>,
+        /// Its fields, already encoded.
         data: Vec<u8>,
     },
 }
@@ -259,10 +317,15 @@ impl Request {
 /// What the server can answer with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Response {
+    /// `SSH_FXP_STATUS`: success, `EOF`, or a failure.
     Status(Status),
+    /// `SSH_FXP_HANDLE`: a handle to an open file or directory.
     Handle(Handle),
+    /// `SSH_FXP_DATA`: bytes read.
     Data(Vec<u8>),
+    /// `SSH_FXP_NAME`: directory entries, or the one name a `REALPATH` or `READLINK` answers.
     Name(Vec<DirEntry>),
+    /// `SSH_FXP_ATTRS`: a file's attributes.
     Attrs(FileAttributes),
     /// `SSH_FXP_EXTENDED_REPLY`: everything after the request id, undecoded — its layout belongs to
     /// the extension that was asked.
@@ -328,7 +391,9 @@ pub(crate) fn encode_init(version: u32) -> Vec<u8> {
 /// The server's half of the handshake.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerVersion {
+    /// The protocol version the server offered; always 3 on an open session.
     pub version: u32,
+    /// The extensions it advertised, as `(name, data)` pairs of bytes.
     pub extensions: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
@@ -350,6 +415,7 @@ pub struct ServerLimits {
     pub max_read_len: u64,
     /// The largest data an `SSH_FXP_WRITE` may carry.
     pub max_write_len: u64,
+    /// The most handles the server lets one session hold open at once.
     pub max_open_handles: u64,
 }
 

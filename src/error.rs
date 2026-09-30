@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+/// The result of every fallible call in this crate.
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// `SSH_FXP_STATUS` codes, v3 (draft-ietf-secsh-filexfer-02 § 7). A code v3 does not name is
@@ -9,21 +10,30 @@ pub type Result<T> = std::result::Result<T, Error>;
 // Why `Unknown` and codes 6 and 7 are carried: docs/map/territory/errors.md.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusCode {
+    /// Code 0. The request succeeded.
     Ok,
+    /// Code 1. The end of a directory listing or of a file.
     Eof,
+    /// Code 2. The path does not exist.
     NoSuchFile,
+    /// Code 3. The server refused the request for lack of permission.
     PermissionDenied,
+    /// Code 4. A failure the server did not classify further.
     Failure,
+    /// Code 5. The server could not parse the request.
     BadMessage,
     /// Code 6. A server should not send it; it is carried if one does.
     NoConnection,
     /// Code 7. A server should not send it; it is carried if one does.
     ConnectionLost,
+    /// Code 8. The server does not support this operation.
     OpUnsupported,
+    /// Any other code, as the server sent it.
     Unknown(u32),
 }
 
 impl StatusCode {
+    /// The status for a code as it appears on the wire.
     pub fn from_wire(v: u32) -> Self {
         match v {
             0 => Self::Ok,
@@ -39,6 +49,7 @@ impl StatusCode {
         }
     }
 
+    /// The code as it appears on the wire.
     pub fn to_wire(self) -> u32 {
         match self {
             Self::Ok => 0,
@@ -71,16 +82,26 @@ impl StatusCode {
 /// caller's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Status {
+    /// The status code.
     pub code: StatusCode,
+    /// The server's error message, decoded as UTF-8 with invalid bytes replaced.
     pub message: String,
+    /// The message's language tag (RFC 1766), often empty.
     pub language_tag: String,
 }
 
+/// Everything that can go wrong talking to an SFTP server.
+///
+/// [`Error::Status`] is the server saying no — [`StatusCode::NoSuchFile`],
+/// [`StatusCode::PermissionDenied`] and so on. Every other variant is about the connection or the
+/// protocol.
 #[derive(Debug)]
 pub enum Error {
     /// A packet ended before a field it declared: how many bytes were needed and how many were left.
     Truncated {
+        /// Bytes the field needed.
         needed: usize,
+        /// Bytes left in the packet.
         had: usize,
     },
     /// A length above a ceiling: an inbound packet over [`Config::max_inbound_packet`], an outbound
@@ -90,14 +111,18 @@ pub enum Error {
     /// [`Config::max_inbound_packet`]: crate::Config::max_inbound_packet
     /// [`Config::max_outbound_packet`]: crate::Config::max_outbound_packet
     TooLong {
+        /// The length that was declared or asked for.
         len: u64,
+        /// The ceiling it exceeded.
         limit: u64,
     },
     /// A packet type byte this client does not implement.
     UnknownPacketType(u8),
     /// A reply arrived whose type cannot answer the request that is waiting.
     UnexpectedReply {
+        /// The reply type the request needed.
         expected: &'static str,
+        /// The packet type byte that arrived.
         got: u8,
     },
     /// A new request drew an id that is **already outstanding** — the `u32` counter wrapped.
@@ -106,12 +131,15 @@ pub enum Error {
     Status(Status),
     /// The server offered a protocol version this client does not speak.
     UnsupportedVersion {
+        /// The version the server offered.
         theirs: u32,
+        /// The version this client speaks, [`crate::VERSION`].
         ours: u32,
     },
     /// The session ended, and `cause` is why. When the reader stops, every waiting request gets the
     /// same cause; when a write fails, the failing request and those queued behind it do.
     SessionEnded {
+        /// Why the session ended.
         cause: std::sync::Arc<Error>,
     },
     /// The request's bytes did not reach the stream within [`Config::write_timeout`]: the peer
@@ -125,8 +153,9 @@ pub enum Error {
     ///
     /// [`Config::request_timeout`]: crate::Config::request_timeout
     Timeout,
-    /// The stream ended.
+    /// The stream ended, or the session was already closed.
     Eof,
+    /// The stream failed.
     Io(std::io::Error),
 }
 

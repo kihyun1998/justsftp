@@ -199,6 +199,7 @@ impl Session {
         Ok((stream, server))
     }
 
+    /// The server's half of the handshake: its version and the extensions it advertised.
     pub fn server_version(&self) -> &ServerVersion {
         &self.server
     }

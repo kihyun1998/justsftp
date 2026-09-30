@@ -20,12 +20,20 @@ const S_IPERM: u32 = 0o7777;
 // Masked and compared for equality, never tested as a subset: docs/map/territory/file-attributes.md.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileType {
+    /// A named pipe (`S_IFIFO`).
     Fifo,
+    /// A character device (`S_IFCHR`).
     CharDevice,
+    /// A directory (`S_IFDIR`).
     Directory,
+    /// A block device (`S_IFBLK`).
     BlockDevice,
+    /// A regular file (`S_IFREG`).
     Regular,
+    /// A symbolic link (`S_IFLNK`). Seen from [`crate::Session::lstat`] and in listings; `stat`
+    /// follows the link.
     Symlink,
+    /// A socket (`S_IFSOCK`).
     Socket,
     /// A type value POSIX does not define. Carried rather than guessed at.
     Other(u32),
@@ -49,7 +57,9 @@ impl FileType {
 /// One `name = value` pair from the `SSH_FILEXFER_ATTR_EXTENDED` tail, both halves as bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Extension {
+    /// The extension's name, such as `foo@example.com`.
     pub name: Vec<u8>,
+    /// Its value, in whatever format the extension defines.
     pub value: Vec<u8>,
 }
 
@@ -57,14 +67,21 @@ pub struct Extension {
 /// [`AttrsUpdate`] instead.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FileAttributes {
+    /// The size in bytes.
     pub size: Option<u64>,
+    /// The owner's numeric user id. Present exactly when `gid` is.
     pub uid: Option<u32>,
+    /// The owner's numeric group id. Present exactly when `uid` is.
     pub gid: Option<u32>,
     /// The raw POSIX mode word, type nibble included. Use [`Self::file_type`] and
     /// [`Self::permissions`] rather than reading it directly.
     pub mode: Option<u32>,
+    /// The last access time, in seconds since the Unix epoch. Present exactly when `mtime` is.
     pub atime: Option<u32>,
+    /// The last modification time, in seconds since the Unix epoch. Present exactly when `atime`
+    /// is.
     pub mtime: Option<u32>,
+    /// Extended attributes the server attached, if any.
     pub extensions: Vec<Extension>,
 }
 
@@ -128,6 +145,7 @@ pub struct AttrsUpdate {
 }
 
 impl AttrsUpdate {
+    /// An update that changes nothing.
     pub fn new() -> Self {
         Self::default()
     }
@@ -157,6 +175,7 @@ impl AttrsUpdate {
         self
     }
 
+    /// Whether this update changes nothing.
     pub fn is_empty(&self) -> bool {
         self.size.is_none()
             && self.owner.is_none()

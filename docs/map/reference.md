@@ -105,6 +105,7 @@ Counted over every upstream issue and commit in 2026-08 (PenTerm). Two are real-
 | R42 | `sftp-server.c` `process_extended_limits` | writes packet, read, write, handles, in that order. |
 | R43 | `sftp-client.c`, after `sftp_get_limits` | the download and upload lengths floor at 64. |
 | R44 | `sftp-server.c` `handle_to_string` | a handle is 4 bytes. |
+| R45 | `sftp-server.c` `flags_from_portable` | each `SSH2_FXF_*` flag maps to its own `open(2)` flag; `TRUNC` becomes `O_TRUNC` with or without `CREAT`. |
 
 ## Specifications
 

@@ -18,6 +18,7 @@ pub enum Walk {
 /// The result of a walk, and **whether it is the whole directory**.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Listing {
+    /// Every entry read, in the order the server sent them.
     pub entries: Vec<DirEntry>,
     /// `true` when the caller answered [`Walk::Stop`] before the server reported `EOF`.
     pub stopped: bool,
@@ -51,6 +52,8 @@ impl Session {
         Ok(names.remove(0).filename)
     }
 
+    /// Opens a directory for [`Self::read_dir`]. Close the handle with [`Self::close_handle`];
+    /// [`Self::list_dir`] does both for you.
     pub async fn open_dir(&self, path: &[u8]) -> Result<Handle> {
         self.expect_handle(Request::OpenDir {
             path: path.to_vec(),
@@ -126,6 +129,8 @@ impl Session {
         self.open_file_with(path, flags, AttrsUpdate::new()).await
     }
 
+    /// Opens a file, sending `attrs` for a file this creates — its permissions, say. Close the
+    /// handle with [`Self::close_handle`].
     pub async fn open_file_with(
         &self,
         path: &[u8],
@@ -368,7 +373,8 @@ impl Session {
 
     /// Opens an **existing** file for writing, truncated: `WRITE | TRUNCATE` without `CREATE`, so a
     /// missing file is refused (`NoSuchFile`) rather than made. The file keeps its inode, owner and
-    /// permissions.
+    /// permissions. `TRUNCATE` without `CREATE` is outside the draft, which requires both; OpenSSH's
+    /// server accepts it.
     pub async fn overwrite_file(&self, path: &[u8]) -> Result<WriteFile<'_>> {
         let handle = self
             .open_file(path, OpenFlags::WRITE | OpenFlags::TRUNCATE)
@@ -440,6 +446,8 @@ impl Session {
 }
 
 impl Session {
+    /// Writes `data` at `offset`: all of it, or an error. Data longer than the server's stated
+    /// write bound is refused with [`Error::TooLong`] before it is sent.
     pub async fn write(&self, handle: &Handle, offset: u64, data: &[u8]) -> Result<()> {
         // The server's own write bound; the outbound ceiling is checked in `enqueue`.
         if let Some(limit) = self.server_write_len(handle.as_bytes().len()) {
@@ -458,6 +466,8 @@ impl Session {
         .await
     }
 
+    /// Releases a file or directory handle. Every handle from [`Self::open_dir`],
+    /// [`Self::open_file`] or [`Self::open_file_with`] needs this; servers allow only so many open.
     pub async fn close_handle(&self, handle: &Handle) -> Result<()> {
         self.expect_ok(Request::Close {
             handle: handle.clone(),
@@ -481,6 +491,7 @@ impl Session {
         .await
     }
 
+    /// An open file's attributes.
     pub async fn fstat(&self, handle: &Handle) -> Result<FileAttributes> {
         self.expect_attrs(Request::FStat {
             handle: handle.clone(),
@@ -500,6 +511,7 @@ impl Session {
         .await
     }
 
+    /// Changes an open file's attributes. An empty update is not sent.
     pub async fn set_stat_handle(&self, handle: &Handle, attrs: AttrsUpdate) -> Result<()> {
         if attrs.is_empty() {
             return Ok(());
@@ -511,6 +523,7 @@ impl Session {
         .await
     }
 
+    /// Deletes a file. For a directory, use [`Self::rmdir`].
     pub async fn remove(&self, path: &[u8]) -> Result<()> {
         self.expect_ok(Request::Remove {
             path: path.to_vec(),
@@ -518,6 +531,7 @@ impl Session {
         .await
     }
 
+    /// Moves `from` to `to`. Under SFTP v3 it is an error if `to` already exists.
     pub async fn rename(&self, from: &[u8], to: &[u8]) -> Result<()> {
         self.expect_ok(Request::Rename {
             from: from.to_vec(),
@@ -526,6 +540,7 @@ impl Session {
         .await
     }
 
+    /// Creates a directory, with the server's default permissions.
     pub async fn mkdir(&self, path: &[u8]) -> Result<()> {
         self.expect_ok(Request::MkDir {
             path: path.to_vec(),
@@ -534,6 +549,7 @@ impl Session {
         .await
     }
 
+    /// Deletes an empty directory.
     pub async fn rmdir(&self, path: &[u8]) -> Result<()> {
         self.expect_ok(Request::RmDir {
             path: path.to_vec(),

@@ -56,7 +56,8 @@ by the caller, `write_file_watched` owning the loop and asking the caller for ea
   file is simply too long, and nothing downstream can notice.
 - **`overwrite_file` is `WRITE | TRUNCATE` without `CREATE`**, so a missing file is refused
   (`NoSuchFile`) rather than made. It is the in-place save of a file being edited — the same inode,
-  so owner and permissions stay.
+  so owner and permissions stay. The draft (§ 6.3) requires `CREATE` whenever `TRUNCATE` is set;
+  OpenSSH's server maps each flag to its own `open(2)` flag (R45), so it works there.
 - **`write_file_from` resumes, and leaves out both `TRUNCATE` and `APPEND`.** Truncating is right for
   an ordinary copy and exactly wrong for a resume, where the bytes already there are the point.
   `APPEND` is left out too: under it the server ignores each write's offset and puts the data at the
@@ -100,3 +101,5 @@ by the caller, `write_file_watched` owning the loop and asking the caller for ea
 ## Known holes / open
 
 - **Zero-length `DATA` and an endless empty `Feed::Bytes`** are unguarded on purpose, above.
+- **`overwrite_file` against a server that enforces § 6.3** is unmeasured; such a server may refuse
+  `TRUNCATE` without `CREATE`.

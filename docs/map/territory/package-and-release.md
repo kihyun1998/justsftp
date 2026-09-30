@@ -27,6 +27,10 @@ call when it moved out of PenTerm (PenTerm ADR-0089, *Amendment — the crate is
     with its own check, not with this absence.
 - **`tokio`'s `io-util` is the test seam**: `tokio::io::duplex` lives behind it
   ([verification](verification.md)).
+- **Every public item is documented**: `#![warn(missing_docs)]` in `lib.rs`, and CI's
+  `-D warnings` turns a missing doc into a failure.
+- **The README's Rust examples compile.** `lib.rs` includes the README as a `#[cfg(doctest)]` item,
+  so `cargo test` checks them; an example that needs another crate (`russh`) is marked `ignore`.
 - **Published docs carry no repository pointers.** The crate root's `//!` and every public item's
   `///` are rendered on docs.rs, where `docs/map/...` points nowhere. A pointer from a public item to
   its note is a plain `//` line; private modules' `//!` headers are not published.
