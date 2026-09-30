@@ -46,13 +46,22 @@ call when it moved out of PenTerm (PenTerm ADR-0089, *Amendment — the crate is
   dark and ayu themes. An image shows only once the commit is on `main`.
 - **The toolchain is pinned** (`rust-toolchain.toml`, 1.96.0) so local and CI builds match and a new
   Rust release cannot turn CI red on its own. `rust-version` in `Cargo.toml` states the same floor.
-- **A version is published with `cargo publish`** after the CI gates pass, with its `CHANGELOG.md`
-  entry written first; a crates.io version cannot be re-published, only yanked.
+- **A version is published by pushing its `vX.Y.Z` tag**, with its `CHANGELOG.md` entry written
+  and the version bumped in `Cargo.toml` first. `.github/workflows/publish.yml` refuses a tag that
+  does not match the crate version, runs the tests, and publishes. A crates.io version cannot be
+  re-published, only yanked.
+- **Publishing uses crates.io Trusted Publishing, so no token is stored.** The job's GitHub OIDC
+  token is traded for a crates.io token that `rust-lang/crates-io-auth-action` revokes when the job
+  ends. crates.io accepts a trusted publisher only for a crate that already exists, so the first
+  version is published by hand with a token scoped to this crate, deleted afterwards. The trusted
+  publisher on crates.io names this repository and the workflow file `publish.yml`; renaming the
+  file breaks publishing until that entry is updated.
 
 ## Code
 
 - `Cargo.toml`, `Cargo.lock`, `README.md`, `CHANGELOG.md`, `LICENSE-MIT`, `LICENSE-APACHE`,
   `rust-toolchain.toml`, `.gitignore`
+- `.github/workflows/publish.yml`
 - `logo/` — the brand pack; its `README.md` says which file each surface uses
 - `src/lib.rs` — the crate docs and the public re-exports
 
@@ -71,5 +80,4 @@ call when it moved out of PenTerm (PenTerm ADR-0089, *Amendment — the crate is
 
 ## Known holes / open
 
-- **No publish workflow.** A version is published by hand.
 - **The GitHub social preview has no API.** It is uploaded by hand under Settings → Social preview.
