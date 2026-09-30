@@ -4,13 +4,9 @@ use std::fmt;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// `SSH_FXP_STATUS` codes, v3 (draft-ietf-secsh-filexfer-02 § 7).
-///
-/// ⚠️ **`Unknown(u32)` is load-bearing, not defensive.** `russh-sftp` models this as a serde enum
-/// with nine variants and no catch-all, so a server answering with a code from a later protocol
-/// version does not produce an unknown *status* — it fails **the whole packet**, and the request it
-/// belonged to surfaces as a decode error with the real reason discarded. A status code is a number
-/// on the wire; refusing to hold one we have no name for buys nothing and loses the reply.
+/// `SSH_FXP_STATUS` codes, v3 (draft-ietf-secsh-filexfer-02 § 7). A code v3 does not name is
+/// carried as `Unknown`, not refused.
+// Why `Unknown` and codes 6 and 7 are carried: docs/map/territory/errors.md.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusCode {
     Ok,
@@ -19,13 +15,9 @@ pub enum StatusCode {
     PermissionDenied,
     Failure,
     BadMessage,
-    /// Code 6. ⚠️ **Kept, deliberately.** `openssh-sftp-protocol` rejects 6 and 7 at parse time on the
-    /// grounds that they are locally generated pseudo-errors a server "MUST NOT return"
-    /// (`response.rs:245-249`). That reasoning is about what a *correct* server does; a client that
-    /// turns a protocol violation into a decode failure loses the ability to report what the server
-    /// actually said. We carry the value and let the caller decide.
+    /// Code 6. A server should not send it; it is carried if one does.
     NoConnection,
-    /// Code 7. See `NoConnection`.
+    /// Code 7. A server should not send it; it is carried if one does.
     ConnectionLost,
     OpUnsupported,
     Unknown(u32),
@@ -62,8 +54,8 @@ impl StatusCode {
         }
     }
 
-    /// `Eof` is how the server ends a directory walk, so it is a control signal rather than a
-    /// failure. Everything except this and `Ok` is an error.
+    /// Everything except `Ok` and `Eof` is an error; `Eof` is how a server ends a directory walk or
+    /// a file read.
     pub fn is_error(self) -> bool {
         !matches!(self, Self::Ok | Self::Eof)
     }
@@ -71,14 +63,12 @@ impl StatusCode {
 
 /// The server answered, and what it said was a failure.
 ///
-/// `message` and `language_tag` are the two fields the spec **does** define as text
-/// (`error message (ISO-10646 UTF-8)`), which is why they are `String` here while every path in
-/// this crate is bytes. The split is the point of the crate.
+/// `message` and `language_tag` are the two fields the spec defines as text, so they are `String`
+/// while every path is bytes.
 ///
-/// ⚠️ **`message` is prose a remote server wrote.** It is parsed as text and handed over verbatim,
-/// escape sequences and control characters included; whether it may be shown, and after what
-/// sanitising, is the caller's. Everything else in [`Error`] is a structured variant carrying
-/// values, not sentences.
+/// ⚠️ **`message` is prose a remote server wrote**, handed over verbatim, escape sequences and
+/// control characters included. Whether it may be shown, and after what sanitising, is the
+/// caller's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Status {
     pub code: StatusCode,
@@ -88,14 +78,17 @@ pub struct Status {
 
 #[derive(Debug)]
 pub enum Error {
-    /// A packet ended before a field it declared. Carries what was asked for and what was left, so
-    /// a fixture that is one byte short says so instead of saying "bad message".
+    /// A packet ended before a field it declared: how many bytes were needed and how many were left.
     Truncated {
         needed: usize,
         had: usize,
     },
-    /// A length field a correct server would never send. **This is the guard against an allocation
-    /// sized by the far end** — see `session::Limits::max_inbound_packet`.
+    /// A length above a ceiling: an inbound packet over [`Config::max_inbound_packet`], an outbound
+    /// one over [`Config::max_outbound_packet`], or, for a write, data longer than the server's
+    /// limits allow.
+    ///
+    /// [`Config::max_inbound_packet`]: crate::Config::max_inbound_packet
+    /// [`Config::max_outbound_packet`]: crate::Config::max_outbound_packet
     TooLong {
         len: u64,
         limit: u64,
@@ -110,12 +103,6 @@ pub enum Error {
     /// A reply arrived carrying a request id nothing is waiting on.
     UnknownRequestId(u32),
     /// A new request drew an id that is **already outstanding** — the `u32` counter wrapped.
-    ///
-    /// ⚠️ Distinct from `UnknownRequestId`, and an earlier draft reused that one for this. They are
-    /// exact inverses — nothing waiting versus something already waiting — so the log line read as
-    /// the opposite of what happened. `russh-sftp` has neither: it `insert`s blindly
-    /// (`rawsession.rs:206`), dropping the previous sender, and the earlier caller is told the
-    /// sender was dropped.
     RequestIdInUse(u32),
     /// The server answered the request with `SSH_FXP_STATUS` and a failing code.
     Status(Status),
@@ -124,29 +111,21 @@ pub enum Error {
         theirs: u32,
         ours: u32,
     },
-    /// The session ended, and this is why.
-    ///
-    /// ⚠️ **`Arc` is what lets every waiter learn the real cause, and it is not decoration.**
-    /// `Error` cannot be `Clone` — `std::io::Error` is not — so an earlier version handed the real
-    /// reason to *one* waiter and told the rest `Eof`. With N requests in flight that is N−1 wrong
-    /// answers, and "first" was whichever one `HashMap::drain` happened to yield, which is
-    /// nondeterministic. Worse, `Eof` is a **false statement** for the cases that matter most: on a
-    /// `TooLong` refusal the stream is not over at all — this client refused to continue.
+    /// The session ended, and `cause` is why. When the reader stops, every waiting request gets the
+    /// same cause; when a write fails, the failing request and those queued behind it do.
     SessionEnded {
         cause: std::sync::Arc<Error>,
     },
-    /// The request could not be written to the stream inside the budget.
+    /// The request's bytes did not reach the stream within [`Config::write_timeout`]: the peer
+    /// stopped reading. Not the same as [`Error::Timeout`].
     ///
-    /// ⚠️ **Distinct from `Timeout`, and the distinction is the whole point.** `Timeout` means the
-    /// server did not answer; this means the bytes never got out — a peer that accepted the
-    /// subsystem and then stopped reading, so the channel window never reopens. Collapsing the two
-    /// reports "the server is slow" for a connection that is wedged.
+    /// [`Config::write_timeout`]: crate::Config::write_timeout
     WriteTimeout,
-    /// The request was written to the stream and no reply arrived inside the budget.
+    /// The request was written and no reply arrived within [`Config::request_timeout`], counted
+    /// from when the bytes reached the stream. Also the handshake's, where one budget covers
+    /// writing `SSH_FXP_INIT` and the reply.
     ///
-    /// ⚠️ **The clock starts when the bytes are written, not when they are queued** — see
-    /// `session`. That distinction is upstream #95 and it is why this variant exists rather than a
-    /// bare `Timeout`.
+    /// [`Config::request_timeout`]: crate::Config::request_timeout
     Timeout,
     /// The stream ended.
     Eof,

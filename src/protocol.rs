@@ -1,11 +1,4 @@
-//! Packet types, requests and responses. Version 3 of the protocol.
-//!
-//! **v3 is a decision, not a default.** Both implementations read on disk hard-code it
-//! (`russh-sftp/protocol/mod.rs:67`, `openssh-sftp-protocol/constants.rs:22`) and it is what
-//! essentially every server speaks. What the draft's § 10.1 records is that v3 is the version that
-//! *added* the error message and language tag to `SSH_FXP_STATUS` — so a client that speaks v3 and
-//! is answered with v2 will over-read every status packet. That is a real hole in both crates
-//! measured, neither of which has a version branch; here the handshake refuses instead.
+//! Packet types, requests and responses of SFTP version 3 (docs/map/territory/packets.md).
 
 use crate::attrs::{AttrsUpdate, FileAttributes};
 use crate::error::{Error, Result, Status, StatusCode};
@@ -34,7 +27,7 @@ pub(crate) mod packet {
     pub const STAT: u8 = 17;
     pub const RENAME: u8 = 18;
     pub const READLINK: u8 = 19;
-    // ⚠️ SYMLINK (20) is deliberately absent. See the note on `Request`.
+    // SYMLINK (20) is deliberately absent (docs/map/territory/packets.md).
     pub const STATUS: u8 = 101;
     pub const HANDLE: u8 = 102;
     pub const DATA: u8 = 103;
@@ -47,7 +40,7 @@ pub(crate) mod packet {
 /// The extension that reports a server's size limits (OpenSSH `PROTOCOL` § 4.8).
 pub(crate) const LIMITS_EXTENSION: &[u8] = b"limits@openssh.com";
 
-/// `SSH_FXF_*` open flags, draft § 6.3. Values confirmed identical in both implementations.
+/// `SSH_FXF_*` open flags, draft § 6.3.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct OpenFlags(u32);
 
@@ -68,9 +61,7 @@ impl OpenFlags {
     }
 
     pub const fn contains(self, other: Self) -> bool {
-        // Legal here and nowhere near the POSIX mode word: these really are independent bits, so a
-        // subset test is the right operation. Trap #36 is about a *type field* wearing a bitfield's
-        // clothes — see `attrs::FileType`.
+        // A subset test is right for independent bits; `attrs::FileType` is the case where it is not.
         self.0 & other.0 == other.0
     }
 }
@@ -82,15 +73,9 @@ impl std::ops::BitOr for OpenFlags {
     }
 }
 
-/// An opaque token the server gave us to address an open file or directory.
-///
-/// ⚠️ **Bytes.** `russh-sftp` types its handle as
-/// `String` (`protocol/handle.rs:6-8`), so it runs an opaque binary token through the same
-/// `from_utf8_lossy` that destroys filenames. That is a **second corruption site, independent of
-/// the first**: a mangled handle addresses the wrong file — or nothing — on every subsequent read,
-/// write and close, and no filename has to be unusual for it to happen. The draft gives the field
-/// as a `string`, which is arbitrary binary data (RFC 4251 § 5), and servers are free to put a
-/// pointer, a counter or a nonce in it.
+/// An opaque token the server gave to address an open file or directory, kept as the bytes it
+/// sent.
+// Bytes for the same reason as a path: docs/map/invariant/paths-are-bytes.md.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Handle(pub Vec<u8>);
 
@@ -105,27 +90,16 @@ impl Handle {
 pub struct DirEntry {
     /// The name **as the server holds it**. This is the value that addresses the file.
     pub filename: Vec<u8>,
-    /// The server's `ls -l`-style rendering, kept rather than discarded.
-    ///
-    /// Both implementations measured throw this away (`openssh` at parse time, `russh-sftp` in
-    /// `read_dir`). The draft describes it as *"suitable for use in the output of a directory
-    /// listing command"*, and it is the only place a v3 server states a file's type as text — which
-    /// matters precisely when the attributes carry no `PERMISSIONS` flag. Bytes, not text: it
-    /// contains a filename.
+    /// The server's `ls -l`-style rendering. The only place a v3 server states a file's type as
+    /// text, which matters when `attrs` carries no mode. Bytes, since it contains the filename.
+    // Kept, where both reference implementations discard it: docs/map/territory/packets.md.
     pub longname: Vec<u8>,
     pub attrs: FileAttributes,
 }
 
-/// What this client can ask for.
-///
-/// ⚠️ **`SSH_FXP_SYMLINK` is deliberately not here.** The draft's § 6.10 gives the arguments as
-/// `linkpath` then `targetpath`, and `russh-sftp` follows it (`protocol/symlink.rs:5-9`);
-/// `openssh-sftp-protocol` **swaps them on purpose** (`request.rs:276-281`) because the OpenSSH
-/// server itself deviates. Whichever order is chosen is wrong against half the server population,
-/// and nothing on disk settles it — it needs a measurement against real servers. Creating a symlink
-/// is also outside this crate's scope (listing, transfer, basic metadata), so the
-/// honest move is to leave the verb out rather than ship a coin flip. `READLINK` takes one path and
-/// has no such ambiguity, so it stays.
+/// What this client can ask for. There is no `SSH_FXP_SYMLINK`: servers disagree on its argument
+/// order.
+// Why SYMLINK is left out: docs/map/territory/packets.md.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
     Open {
@@ -296,13 +270,8 @@ pub enum Response {
 }
 
 impl Response {
-    /// The wire type byte this variant came from.
-    ///
-    /// ⚠️ **A number, not a label.** An earlier draft had this return `&'static str` and the caller
-    /// mapped the string back to a number — in a crate whose entire thesis is *do not route a value
-    /// through a type it does not fit*, that was the one place the pattern survived. A
-    /// one-character drift in either copy of the literal silently collapsed every unexpected reply
-    /// onto a single code, with no compile error to catch it.
+    /// The wire type byte this variant came from — a number, not a label
+    /// (docs/map/territory/packets.md).
     pub(crate) fn packet_type(&self) -> u8 {
         match self {
             Self::Status(_) => packet::STATUS,
@@ -320,10 +289,8 @@ impl Response {
         match packet_type {
             packet::STATUS => Ok(Self::Status(Status {
                 code: StatusCode::from_wire(r.u32()?),
-                // ⚠️ Read unconditionally, which is only correct because the handshake refused
-                // anything below v3. These two fields are v3's own addition (draft § 10.1); against
-                // a v2 server they are not there and reading them walks off the end of the packet.
-                // Both crates measured read them unconditionally *without* the handshake guard.
+                // Read unconditionally, which is correct only because the handshake refuses anything
+                // but v3 (docs/map/territory/packets.md).
                 message: r.text()?,
                 language_tag: r.text()?,
             })),
@@ -331,9 +298,8 @@ impl Response {
             packet::DATA => Ok(Self::Data(r.string()?)),
             packet::NAME => {
                 let count = r.u32()?;
-                // The count is the far end's, so it cannot size an allocation on its own — a
-                // declared 4 billion entries would reserve before a single one was read. Each entry
-                // costs at least 12 bytes on the wire, so what is actually present bounds it.
+                // Reserves at most what the remaining bytes could hold, at 12 bytes an entry
+                // (docs/map/invariant/the-far-end-sizes-nothing.md).
                 let cap = (count as usize).min(r.remaining() / 12 + 1);
                 let mut entries = Vec::with_capacity(cap);
                 for _ in 0..count {
@@ -397,11 +363,8 @@ pub(crate) fn decode_limits(body: &[u8]) -> Result<ServerLimits> {
     })
 }
 
-/// ⚠️ **Extensions run to the end of the packet and carry no count** (draft § 4). Both
-/// implementations agree. `russh-sftp` reads the names as `String` through its lossy path, so a
-/// non-UTF-8 extension name becomes U+FFFD and then silently fails its own `has_extension` name
-/// comparison — a supported extension reads as absent. Bytes here for the same reason as everywhere
-/// else.
+/// `SSH_FXP_VERSION`'s body: the version, then extension pairs running to the end of the packet
+/// with no count (draft § 4), each half kept as bytes.
 pub(crate) fn decode_version(r: &mut Reader<'_>) -> Result<ServerVersion> {
     let version = r.u32()?;
     let mut extensions = Vec::new();
@@ -441,12 +404,9 @@ mod tests {
 
     #[test]
     fn a_non_utf8_path_reaches_the_wire_byte_for_byte() {
-        // The half that matters. Listing the bytes is not enough — a request addressed by them has
-        // to carry them unchanged, or the file is still untouchable.
+        // A request addressed by the listed bytes carries them unchanged.
         //
-        // Mutation: type `Request::Open.path` as `String`. That does not compile, which is the
-        // point; the runnable mutation is to route `path` through `String::from_utf8_lossy` in
-        // `encode`, and this assertion reddens.
+        // Mutation: route `path` through `String::from_utf8_lossy` in `encode`.
         let path: Vec<u8> = vec![0xC7, 0xD1, 0xB1, 0xDB, 0x2E, 0x74, 0x78, 0x74];
         let bytes = Request::Open {
             path: path.clone(),
@@ -478,12 +438,9 @@ mod tests {
 
     #[test]
     fn a_handle_is_opaque_bytes_and_goes_back_unchanged() {
-        // ⚠️ The second corruption site. This handle is not valid UTF-8 — servers put counters and
-        // pointers in these — and `russh-sftp` would lossy-convert it, addressing the wrong file on
-        // every later operation.
+        // A handle that is not valid UTF-8 goes back byte for byte.
         //
-        // Mutation: type `Handle` as `String`. Non-compiling, so the runnable one is to route the
-        // handle through `from_utf8_lossy` in `Request::encode`; this reddens.
+        // Mutation: route the handle through `from_utf8_lossy` in `Request::encode`.
         let handle = Handle(vec![0x00, 0xFF, 0x80, 0x01]);
         let bytes = Request::Read {
             handle,
@@ -507,10 +464,8 @@ mod tests {
 
     #[test]
     fn write_sends_the_handle_then_the_offset_then_the_data() {
-        // ⚠️ This arm was the one distinct field order with no test, and it is the data-destroying
-        // one. Mutation: swap `w.u64(*offset)` and `w.string(data)`. Nothing else in the crate
-        // reddens — while against a real server the first four bytes of the payload become the high
-        // half of a 64-bit offset, so the write lands gigabytes into the file.
+        // Mutation: swap `w.u64(*offset)` and `w.string(data)`. Nothing else in the crate reddens,
+        // while against a real server the write would land gigabytes into the file.
         let bytes = Request::Write {
             handle: Handle(vec![0xAA]),
             offset: 0x0102_0304_0506_0708,
@@ -532,9 +487,7 @@ mod tests {
 
     #[test]
     fn every_response_variant_reports_its_own_wire_type() {
-        // Mutation: point any arm of `packet_type` at another constant. Before this existed the
-        // mapping went through `&'static str` and back, where a one-character drift collapsed every
-        // unexpected reply onto one code with no compile error.
+        // Mutation: point any arm of `packet_type` at another constant.
         use crate::error::Status;
         let status = Status {
             code: StatusCode::Ok,
@@ -554,8 +507,8 @@ mod tests {
 
     #[test]
     fn rename_sends_from_before_to() {
-        // Mutation: swap the two `w.string` calls. Renaming then moves the wrong way, and against a
-        // real server it usually *succeeds* — which is why this is asserted on the bytes.
+        // Mutation: swap the two `w.string` calls. A swapped rename usually succeeds against a real
+        // server, so this is asserted on the bytes.
         let bytes = Request::Rename {
             from: b"a".to_vec(),
             to: b"bb".to_vec(),

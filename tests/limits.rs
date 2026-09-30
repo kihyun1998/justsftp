@@ -1,4 +1,4 @@
-//! Asking the server for its limits — `limits@openssh.com` (the-server-offers-and-we-cannot-ask 01).
+//! Asking the server for its limits — `limits@openssh.com` (docs/map/territory/transfer-lengths.md).
 //!
 //! The fake server here advertises the extension in `SSH_FXP_VERSION` and answers the request with
 //! whatever four numbers a test gives it. Everything is observed from outside: what the public API

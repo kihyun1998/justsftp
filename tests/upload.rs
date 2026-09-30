@@ -1,26 +1,6 @@
-//! Writing a whole file **with someone watching** — the other half of what a transfer needs
-//! (the-explorer-opens-two-kinds-of-folder 13).
-//!
-//! The mirror of `download.rs`, and the same argument for where the loop lives: the handle is
-//! closed whichever way the write ends, a server has a finite number of open handles, and a caller
-//! that drove `open_file`/`write` itself in order to insert a cancel check would have to reproduce
-//! that discipline.
-//!
-//! # One asymmetry, and it is not cosmetic
-//!
-//! ⚠️ **There is no short write.** `SSH_FXP_READ` may answer with fewer bytes than asked for, which
-//! is why `download.rs` has a whole test about not mistaking that for the end of the file.
-//! `SSH_FXP_WRITE` answers `SSH_FXP_STATUS` — it either wrote everything or it failed. So the
-//! upload loop has no partial-progress case to get wrong, and the offset advances by exactly what
-//! was handed over.
-//!
-//! # Why the caller is asked for bytes rather than handing them in
-//!
-//! A transfer's source may be a local file, another server, or something not yet written. The crate
-//! owns the loop (for the handle) and asks for the next chunk; what produces the bytes is the
-//! caller's.
-//! [`Feed`] is three answers rather than an `Option` because "no more bytes" and "stop, the user
-//! cancelled" are different outcomes and the caller must not have to encode one as the other.
+//! Writing a whole file with someone watching — `write_file_watched` — and pushing it with
+//! `WriteFile`, and how much fits in one write (docs/map/territory/file-transfer.md,
+//! docs/map/territory/transfer-lengths.md).
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -103,10 +83,7 @@ impl Observed {
     }
 }
 
-/// A server that answers `OPEN`, acknowledges every `WRITE`, and answers `CLOSE`.
-///
-/// ⚠️ It keeps serving after the caller stops, for the same reason `download.rs`'s does: a stopped
-/// upload sends `CLOSE` and a server that exited would hang the test rather than fail it.
+/// A server that answers `OPEN`, acknowledges every `WRITE`, and answers `CLOSE`, after a stop too.
 fn spawn_server(mut side: tokio::io::DuplexStream) -> Arc<Observed> {
     let seen = Arc::new(Observed::default());
     let out = Arc::clone(&seen);
@@ -166,11 +143,6 @@ fn feeder(chunks: Vec<Vec<u8>>) -> impl FnMut(u32) -> Feed {
 }
 
 // ── the pushable writer ─────────────────────────────────────────────────────
-//
-// `write_file_watched` pulls through a **synchronous** `Feed`, which is enough when the source is a
-// local file and not enough when the source is itself async — a remote-to-remote copy has to
-// `await` the far side's read inside the loop. `WriteFile` is the same file open, pushed into.
-// (The mirror of `ReadFile` in `download.rs`, and it exists for the mirrored reason.)
 
 #[tokio::test]
 async fn a_caller_can_push_chunks_one_at_a_time() {
@@ -192,8 +164,7 @@ async fn a_caller_can_push_chunks_one_at_a_time() {
     assert_eq!(session.in_flight(), 0);
 }
 
-/// ⚠️ The accepted cost, made loud — the same one `ReadFile` carries. `Drop` cannot close, so it
-/// refuses to be quiet instead.
+/// Dropping a `WriteFile` without `close` panics in a debug build.
 #[tokio::test]
 #[should_panic(expected = "close")]
 async fn dropping_a_writer_without_closing_is_loud() {
@@ -202,8 +173,7 @@ async fn dropping_a_writer_without_closing_is_loud() {
     drop(open);
 }
 
-/// The degenerate case, first: a caller with nothing to send still opens, writes nothing, and
-/// closes. An upload of an empty file is an ordinary thing to ask for.
+/// A caller with nothing to send still opens, writes nothing, and closes.
 #[tokio::test]
 async fn an_empty_file_writes_nothing_and_still_closes() {
     let (session, seen) = connect().await;
@@ -242,8 +212,7 @@ async fn the_bytes_arrive_in_order_at_advancing_offsets() {
     assert_eq!(upload.bytes, 11);
     assert!(!upload.stopped);
     assert_eq!(seen.assembled(), b"hello world");
-    // ⚠️ The offset advances by what was **written**, and a write is all-or-error — there is no
-    // short write to account for (see this file's header).
+    // The offset advances by what was written; a write is all or an error.
     assert_eq!(
         seen.writes().iter().map(|(o, _)| *o).collect::<Vec<_>>(),
         vec![0, 6]
@@ -251,8 +220,7 @@ async fn the_bytes_arrive_in_order_at_advancing_offsets() {
     assert_eq!(totals, vec![6, 5]);
 }
 
-/// The file is created and emptied, not appended to. Opening without `TRUNCATE` leaves the tail of
-/// a longer previous file behind, which is a corrupt destination that reports success.
+/// The file is opened with `WRITE | CREATE | TRUNCATE`.
 #[tokio::test]
 async fn the_destination_is_created_and_truncated() {
     let (session, seen) = connect().await;
@@ -268,8 +236,7 @@ async fn the_destination_is_created_and_truncated() {
     assert_eq!(flags & 0x0000_0010, 0x0000_0010, "TRUNCATE");
 }
 
-/// `Stop` is not `Done`: the caller cancelled, and the result says so rather than looking like a
-/// complete file. The bytes already accepted stay accepted — the crate cannot unwrite them.
+/// `Stop` is not `Done`: the result says it stopped, and counts what the server already took.
 #[tokio::test]
 async fn stopping_says_so_and_keeps_what_the_server_already_took() {
     let (session, seen) = connect().await;
@@ -292,7 +259,7 @@ async fn stopping_says_so_and_keeps_what_the_server_already_took() {
     assert!(seen.closed.load(Ordering::SeqCst));
 }
 
-/// A server has a finite number of open handles; leaking one per upload exhausts them.
+/// The handle is closed at the end.
 #[tokio::test]
 async fn the_handle_is_closed_at_the_end() {
     let (session, seen) = connect().await;
@@ -303,12 +270,11 @@ async fn the_handle_is_closed_at_the_end() {
         .expect("upload");
 
     assert!(seen.closed.load(Ordering::SeqCst));
-    // Steady state is zero — every request reclaimed its slot in the pending map.
+    // Every slot reclaimed.
     assert_eq!(session.in_flight(), 0);
 }
 
-/// The caller is told how much fits, so it can read exactly that much from its source rather than
-/// guessing and having the crate split it again.
+/// `next` is asked for the `chunk_len` the caller passed.
 #[tokio::test]
 async fn the_caller_is_asked_for_the_length_that_fits() {
     let (session, _seen) = connect().await;
@@ -332,23 +298,10 @@ async fn the_caller_is_asked_for_the_length_that_fits() {
 
 // ── How much fits in one packet ──────────────────────────────────────────────
 //
-// ⚠️ **A caller driving its own loop has no way to know this, and one did the arithmetic wrong.**
-// `explorer_transfer` picked 256 KiB — the same number as `max_outbound_packet` — so every full
-// chunk overflowed by the header and `Session::write` refused it. Measured: an upload of any file
-// larger than one chunk had never worked. The read side never had this bug because
-// `max_read_len()` already existed; the write side had no twin.
-//
-// ⚠️ **The three below do not all measure the same thing, and it took a mutation to see it.** The
-// first two ask `max_chunk()` for a number and then check `write()` against that same number, so
-// they pin **agreement between the two** — a `write()` whose limit drifted away from what
-// `max_chunk()` advertises. They cannot see a `max_chunk()` that is simply wrong: measured, a
-// ceiling one byte low leaves both of them green.
-//
-// The third is the one that pins the **value**, against the encoder's arithmetic rather than a copy
-// of the number. Mutating the ceiling by one in either direction reddens it and nothing else.
+// The first two pin agreement between `max_chunk()` and `write()`; the third pins the value
+// (docs/map/territory/verification.md).
 
-/// The largest chunk the crate advertises really does fit — and it is not a smaller number that
-/// happens to fit.
+/// A chunk of exactly `max_chunk()` bytes is accepted.
 #[tokio::test]
 async fn a_chunk_at_the_advertised_ceiling_is_accepted() {
     let (session, seen) = connect().await;
@@ -367,8 +320,7 @@ async fn a_chunk_at_the_advertised_ceiling_is_accepted() {
     );
 }
 
-/// One byte more does not. Without this, an off-by-one that made `max_chunk()` *smaller* would go
-/// unnoticed — and "smaller" is the direction a careless fix goes.
+/// One byte more is refused.
 #[tokio::test]
 async fn one_byte_past_the_ceiling_is_refused() {
     let (session, _seen) = connect().await;
@@ -381,28 +333,21 @@ async fn one_byte_past_the_ceiling_is_refused() {
         "expected TooLong, got {refused:?}"
     );
 
-    // ⚠️ The handle still has to come back. A caller that hits the ceiling and then gives up is
-    // exactly the shape that leaked one in a consumer's transfer loop.
+    // The handle still comes back after a refusal.
     w.close().await.expect("close after a refusal");
 }
 
-/// ⚠️ **The ceiling is the *packet*, not the payload, and this is what says so.**
-///
-/// `max_chunk()` could be written as a plain constant and both tests above would still pass. What
-/// they cannot see is whether it tracks the **handle**, which the server chooses per file and may
-/// make longer. This one reads the number the crate answers and checks it against the encoder's own
-/// arithmetic rather than against a copy of it.
+/// `max_chunk()` is the outbound ceiling less the write header and this file's handle, checked
+/// against the encoder's arithmetic.
 #[tokio::test]
 async fn the_ceiling_leaves_room_for_this_file_s_handle() {
     let (session, _seen) = connect().await;
     let w = session.write_file(b"/srv/out.bin").await.expect("open");
 
-    // `spawn_server` hands out a 4-byte handle, the same length OpenSSH uses.
-    // 25 = length prefix(4) + type(1) + id(4) + handle length prefix(4) + offset(8) + data length
-    // prefix(4). `protocol.rs`'s encoding test pins that shape.
+    // A 4-byte handle, as OpenSSH's. 25 = length prefix(4) + type(1) + id(4) + handle length
+    // prefix(4) + offset(8) + data length prefix(4).
     let ceiling = w.max_chunk();
-    // The handle comes back even though this test writes nothing — `WriteFile` asserts on it, and
-    // that assertion caught this very test forgetting.
+    // Closed although nothing was written; `WriteFile` asserts on it.
     w.close().await.expect("close");
 
     assert_eq!(

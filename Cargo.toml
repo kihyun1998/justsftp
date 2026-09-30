@@ -9,13 +9,12 @@ repository = "https://github.com/kihyun1998/justsftp"
 readme = "README.md"
 keywords = ["sftp", "ssh", "filetransfer", "async", "tokio"]
 categories = ["network-programming", "filesystem", "asynchronous"]
-include = ["src/**", "tests/**", "README.md", "LICENSE-MIT", "LICENSE-APACHE", "Cargo.toml"]
+include = ["/src/**", "/tests/**", "/README.md", "/CHANGELOG.md", "/LICENSE-MIT", "/LICENSE-APACHE", "/Cargo.toml"]
 
-# No SSH dependency, no encoding crate, no serde — see docs/map/territory/dependency-fence.md.
+# tokio only: no SSH dependency, no encoding crate, no serde (docs/map/territory/package-and-release.md).
 [dependencies]
-# tokio: the AsyncRead/AsyncWrite traits themselves plus the oneshot/Mutex used to pair a reply
-# to its request. `io-util` is what `tokio::io::duplex` lives behind, and the duplex pipe is this
-# crate's entire test seam — no SSH, no server, no network.
+# The AsyncRead/AsyncWrite traits, the channels that pair a reply to its request, and `io-util`'s
+# `duplex`, the tests' transport.
 tokio = { version = "1", features = ["io-util", "sync", "time", "rt", "macros"] }
 
 [dev-dependencies]

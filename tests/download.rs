@@ -1,32 +1,5 @@
-//! Reading a whole file **with someone watching**.
-//!
-//! A download is `OPEN` then one `READ` round trip per chunk until the server says `EOF`. The same
-//! two things a watched listing needs sit on this loop and nowhere else — say how far it has got,
-//! and stop — and one more that a listing does not have: **the bytes have to go somewhere**.
-//!
-//! # Why the loop is here rather than in the caller
-//!
-//! The same argument `walk.rs` makes, unchanged: the handle is closed whichever way the read ended,
-//! a server has a finite number of open handles, and a caller that drove `open_file`/`read` itself
-//! in order to insert a cancel check would have to reproduce that discipline. A copy of an
-//! invariant is how two copies stop agreeing.
-//!
-//! # What is *not* here, deliberately
-//!
-//! **The chunk length is the caller's**, passed in. [`Config::max_outbound_packet`]'s own note
-//! gives splitting policy to the caller, so a loop that picked
-//! `max_read_len()` for itself would decide that here. Mechanism (the loop, the close) is the
-//! crate's; policy (how big, and later how many at once) is injected — the same split
-//! `list_dir_watched` draws between the walk and `Walk`.
-//!
-//! **Nothing writes a file.** This crate has no filesystem concern and no encoding dependency; the
-//! chunk is handed out and where it lands is the caller's.
-//!
-//! # The sharp one
-//!
-//! `a_short_read_is_not_the_end_of_the_file`. The draft says a `READ` "may return fewer bytes than
-//! requested" (§ 6.4, for device files), so a loop that treats `data.len() < len` as EOF **silently
-//! truncates the download** — the file arrives, opens, and is wrong. Only `Ok(None)` is EOF.
+//! Reading a whole file with someone watching — `read_file_watched` — and pulling it with
+//! `ReadFile` (docs/map/territory/file-transfer.md).
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -113,21 +86,14 @@ impl Observed {
     }
 }
 
-/// The byte at file offset `n`. Deterministic and position-dependent, so a chunk delivered at the
-/// wrong offset — or delivered twice — is visible in the assembled file rather than plausible.
+/// The byte at file offset `n`, position-dependent so a misplaced chunk shows.
 fn byte_at(n: u64) -> u8 {
     (n % 251) as u8
 }
 
 /// A server that answers `OPEN`, then hands out `script[i]` bytes for the *i*-th `READ` **starting
-/// at whatever offset was asked for**, then `EOF` — and answers `CLOSE` whenever it arrives.
-///
-/// ⚠️ It keeps serving after `EOF` rather than returning, for the same reason `walk.rs`'s does: a
-/// **stopped** read sends `CLOSE` without ever having asked for the last chunk, and a server that
-/// exits at `EOF` would make the cancellation cases hang instead of failing.
-///
-/// ⚠️ A script entry may be **smaller than the length requested**. That is the short read, and it
-/// is the state this file exists to hold.
+/// at whatever offset was asked for**, then `EOF` — and answers `CLOSE` whenever it arrives, after
+/// `EOF` too. A script entry smaller than the length requested is a short read.
 fn spawn_server(mut side: tokio::io::DuplexStream, script: Vec<usize>) -> Arc<Observed> {
     let seen = Arc::new(Observed::default());
     let out = Arc::clone(&seen);
@@ -188,14 +154,6 @@ fn expected(total: u64) -> Vec<u8> {
 }
 
 // ── the pull-able reader ────────────────────────────────────────────────────
-//
-// `read_file_watched` owns its loop, which is right when the *destination* is passive — a local
-// file, a screen. It is wrong for remote-to-remote, where the far side's `write_file_watched` wants
-// to own a loop too and neither can yield. `ReadFile` is the same file open, driven by the caller.
-//
-// ⚠️ **The close stops being structural and becomes a request.** `close_handle` is async and Rust
-// has no async drop, so `Drop` cannot do the work. What it can do is refuse to be quiet, which is
-// what `dropping_without_closing_is_loud` pins.
 
 #[tokio::test]
 async fn a_caller_can_pull_the_file_one_chunk_at_a_time() {
@@ -213,8 +171,7 @@ async fn a_caller_can_pull_the_file_one_chunk_at_a_time() {
     assert_eq!(session.in_flight(), 0);
 }
 
-/// The same short-read rule as the watched loop, and the caller must not get it wrong either:
-/// `Ok(None)` is the end, a short `Ok(Some(..))` is not.
+/// `Ok(None)` is the end; a short `Ok(Some(..))` is not.
 #[tokio::test]
 async fn a_short_pull_is_not_the_end_of_the_file() {
     let (session, _seen) = connect(vec![4, 8, 8]).await;
@@ -242,10 +199,7 @@ async fn the_pulled_offsets_advance_by_what_arrived() {
     assert_eq!(offsets, vec![0, 4, 12, 20]);
 }
 
-/// ⚠️ **The risk this shape accepts, made loud.** `Drop` cannot close — the close is async — so a
-/// caller that forgets leaks a server handle. It can still refuse to be silent, and a debug
-/// assertion is what turns "forgot" into a failing test rather than a server that stops opening
-/// files after a few hundred transfers.
+/// Dropping a `ReadFile` without `close` panics in a debug build.
 #[tokio::test]
 #[should_panic(expected = "close")]
 async fn dropping_without_closing_is_loud() {
@@ -270,16 +224,13 @@ async fn a_whole_file_arrives_in_order_and_the_totals_are_cumulative() {
         .expect("download");
 
     assert_eq!(file, expected(20));
-    // The running total, not the chunk size — a bar fed chunk sizes would restart at every round
-    // trip. Same convention `list_dir_watched` reports on.
+    // The running total, not the chunk size.
     assert_eq!(totals, vec![8, 16, 20]);
     assert_eq!(download.bytes, 20);
     assert!(!download.stopped);
 }
 
-/// ⚠️ **The one that ships silently.** A loop that reads `data.len() < len` as the end of the file
-/// truncates: it returns `Ok`, the temp copy opens, and the user reads a config that stops in the
-/// middle of a line. The draft permits a short read (§ 6.4) and only `Ok(None)` is EOF.
+/// A short read is not the end of the file; only `Ok(None)` is.
 #[tokio::test]
 async fn a_short_read_is_not_the_end_of_the_file() {
     // The first chunk comes back at half the requested length, and there is more after it.
@@ -298,9 +249,7 @@ async fn a_short_read_is_not_the_end_of_the_file() {
     assert_eq!(file, expected(20));
 }
 
-/// The companion to the test above, asserted on the **far** side. A loop that advances the offset
-/// by what it *asked for* rather than by what *arrived* re-reads and skips at the same time, and
-/// the assembled file is silently corrupt rather than short.
+/// Asserted on the far side: each `READ` asks from where the last one's data ended.
 #[tokio::test]
 async fn the_offset_advances_by_what_arrived_not_by_what_was_asked() {
     let (session, seen) = connect(vec![4, 8, 8]).await;
@@ -314,9 +263,7 @@ async fn the_offset_advances_by_what_arrived_not_by_what_was_asked() {
     assert_eq!(offsets, vec![0, 4, 12, 20]);
 }
 
-/// The chunk length on the wire is **the one the caller passed**, not one this crate chose. That is
-/// the whole of the mechanism/policy split: `Config::max_outbound_packet`'s note gives splitting to
-/// the caller, so a loop reaching for `max_read_len()` itself would decide it here.
+/// The chunk length on the wire is the one the caller passed, not `max_read_len()`.
 #[tokio::test]
 async fn the_requested_length_is_the_callers() {
     let (session, seen) = connect(vec![3, 3]).await;
@@ -351,16 +298,14 @@ async fn stopping_keeps_what_arrived_and_says_it_is_a_prefix() {
         .expect("download");
 
     assert_eq!(download.bytes, 16);
-    // The flag is load-bearing: without it the caller cannot tell "the file is 16 bytes" from
-    // "I stopped at 16", and opening a truncated file as if it were whole is the worst outcome.
+    // The flag tells "the file is 16 bytes" from "I stopped at 16".
     assert!(download.stopped);
     assert_eq!(file, expected(16));
 }
 
 #[tokio::test]
 async fn stopping_stops_asking() {
-    // Without this the read would run to the end and merely *report* that it stopped, which buys
-    // the user nothing — the 4 GB still crosses the link.
+    // No `READ` goes out after the stop.
     let (session, seen) = connect(vec![8; 100]).await;
 
     session
@@ -377,8 +322,7 @@ async fn stopping_stops_asking() {
     assert_eq!(seen.reads().len(), 2, "asked twice, then stopped");
 }
 
-/// A server has a finite number of open handles. Leaking one per download exhausts them, and a user
-/// who cancels several large downloads would strand one each time.
+/// The handle is closed on a stop.
 #[tokio::test]
 async fn the_handle_is_closed_on_a_stop() {
     let (session, seen) = connect(vec![8; 100]).await;
@@ -401,13 +345,11 @@ async fn the_handle_is_closed_at_the_end_of_the_file() {
         .expect("download");
 
     assert!(seen.closed.load(Ordering::SeqCst));
-    // Steady state is zero — the pending map reclaimed every slot, including the last EOF read.
+    // Every slot reclaimed, including the last `EOF` read.
     assert_eq!(session.in_flight(), 0);
 }
 
-/// An empty file is `OPEN` then one `READ` answering `EOF`. The callback is never invoked, which
-/// matters to the caller: a progress line that only appears on the first chunk must not be the only
-/// thing that says the download finished.
+/// An empty file is `OPEN` then one `READ` answering `EOF`; the callback is never invoked.
 #[tokio::test]
 async fn an_empty_file_reads_no_chunks_and_still_closes() {
     let (session, seen) = connect(vec![]).await;

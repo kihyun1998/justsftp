@@ -1,28 +1,6 @@
-//! Walking a directory **with someone watching**.
-//!
-//! A remote listing is `OPENDIR` then one `READDIR` round trip per batch until the server says
-//! `EOF`. Two things a caller has to be able to do sit on that loop and nowhere else:
-//!
-//! - **say how far it has got**, because on a slow link the whole thing is a wait with nothing on
-//!   screen, and
-//! - **stop**, because a wrong turn into `node_modules` should not cost a minute.
-//!
-//! # Why the loop is here rather than in the caller
-//!
-//! `list_dir` closes the handle **whichever way the walk ended**, and its comment says why: a
-//! server has a finite number of open handles and leaking one per failed listing exhausts them.
-//! A cancel that stops the walk from outside this crate would have to reproduce that discipline in
-//! the caller, and a copy of an invariant is how the two stop agreeing. So the crate owns the walk and
-//! the caller injects the decision.
-//!
-//! # The fixtures are built here, and that is not the trap `round_trip.rs` names
-//!
-//! That file writes its packet out by hand because it grades a **decoder** — a decoder checked
-//! against its own encoder agrees with itself. What is under test here is the **control flow of the
-//! walk**: how many round trips happen, whether the count reported matches what arrived, and
-//! whether `CLOSE` still goes out when the caller stops early. The builders below share none of
-//! that logic, exactly as `concurrency.rs`'s `attrs_reply` shares none of the pairing logic it
-//! exists to test.
+//! Walking a directory with someone watching — `list_dir_watched` and `list_dir`
+//! (docs/map/territory/listing.md). The replies are built by helpers, since what is graded is the
+//! walk's control flow (docs/map/territory/verification.md).
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -99,11 +77,7 @@ struct Observed {
 }
 
 /// A server that answers `OPENDIR`, then `batches` full `READDIR` replies of `per_batch` entries
-/// named `b<batch>-f<n>`, then `EOF` — and answers `CLOSE` whenever it arrives.
-///
-/// ⚠️ It keeps serving after `EOF` rather than returning, because a **stopped** walk sends `CLOSE`
-/// without ever having asked for the last batch. A server that exits at `EOF` would make the
-/// cancellation cases hang instead of failing.
+/// named `b<batch>-f<n>`, then `EOF` — and answers `CLOSE` whenever it arrives, after `EOF` too.
 fn spawn_server(
     mut side: tokio::io::DuplexStream,
     batches: usize,
@@ -167,8 +141,7 @@ async fn a_watched_walk_reports_after_every_batch_and_the_counts_are_cumulative(
         .await
         .expect("listing");
 
-    // Three batches of four, and the report after each is the running total rather than the batch
-    // size — a bar fed batch sizes would restart at every round trip.
+    // Three batches of four; each report is the running total.
     assert_eq!(seen_counts, vec![4, 8, 12]);
     assert_eq!(listing.entries.len(), 12);
     assert!(!listing.stopped);
@@ -217,14 +190,13 @@ async fn stopping_keeps_what_was_read_and_says_it_is_a_prefix() {
         .expect("listing");
 
     assert_eq!(listing.entries.len(), 20);
-    // The flag is the whole reason a caller can tell "the folder holds 20" from "I stopped at 20".
+    // The flag tells "the folder holds 20" from "I stopped at 20".
     assert!(listing.stopped);
 }
 
 #[tokio::test]
 async fn stopping_stops_asking() {
-    // Without this the walk would read to the end and merely *report* that it stopped, which buys
-    // the user nothing: the wait is the round trips, not the loop.
+    // No `READDIR` goes out after the stop.
     let (session, seen) = connect(50, 10).await;
 
     session
@@ -247,9 +219,7 @@ async fn stopping_stops_asking() {
 
 #[tokio::test]
 async fn a_stopped_walk_still_closes_the_handle() {
-    // ⚠️ The one that silently costs a real server. Handles are finite, and a browser whose user
-    // stops several slow listings would strand one per stop — invisible from our side, and it
-    // surfaces on the server as a limit nobody can attribute.
+    // `CLOSE` goes out after a stop (docs/map/invariant/every-handle-is-closed.md).
     let (session, seen) = connect(50, 10).await;
 
     session
@@ -284,7 +254,7 @@ async fn an_empty_directory_reports_nothing_and_is_not_a_stop() {
 
 #[tokio::test]
 async fn list_dir_is_the_watched_walk_with_nobody_watching() {
-    // The two must not be able to drift: one close discipline, one batching loop.
+    // `list_dir` is the same loop, so the same round trips and the same close.
     let (session, seen) = connect(3, 4).await;
 
     let entries = session.list_dir(b"/var/log").await.expect("listing");
