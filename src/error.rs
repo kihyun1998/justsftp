@@ -100,8 +100,6 @@ pub enum Error {
         expected: &'static str,
         got: u8,
     },
-    /// A reply arrived carrying a request id nothing is waiting on.
-    UnknownRequestId(u32),
     /// A new request drew an id that is **already outstanding** — the `u32` counter wrapped.
     RequestIdInUse(u32),
     /// The server answered the request with `SSH_FXP_STATUS` and a failing code.
@@ -148,7 +146,6 @@ impl fmt::Display for Error {
             Self::UnexpectedReply { expected, got } => {
                 write!(f, "expected {expected}, got packet type {got}")
             }
-            Self::UnknownRequestId(id) => write!(f, "reply for unknown request id {id}"),
             Self::RequestIdInUse(id) => write!(f, "request id {id} is already outstanding"),
             Self::Status(s) => write!(f, "server status {:?}: {}", s.code, s.message),
             Self::UnsupportedVersion { theirs, ours } => {

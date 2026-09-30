@@ -32,9 +32,10 @@ the status number as it comes off the wire.
   another reply type (`client::unexpected`): *the server said no* is the useful sentence — the caller
   wants `NoSuchFile`, not "expected HANDLE".
 - **Each pair of look-alike variants is kept apart on purpose:**
-  - `RequestIdInUse` versus `UnknownRequestId` — exact inverses, nothing waiting versus something
-    already waiting. An earlier draft reused `UnknownRequestId` for the wrapped counter, so the log
-    line read as the opposite of what happened.
+  - `RequestIdInUse` names a wrapped counter — something already waiting under the id. There is
+    no error for the inverse, a reply nothing waits on: `read_loop` drops it
+    ([request pairing](request-pairing.md)). An earlier draft reused an "unknown id" variant for the
+    wrapped counter, so the log line read as the opposite of what happened.
   - `WriteTimeout` versus `Timeout` — `Timeout` means the server did not answer; `WriteTimeout`
     means the bytes never got out, a peer that accepted the subsystem and then stopped reading so the
     channel window never reopens. Collapsing the two reports "the server is slow" for a connection
@@ -71,6 +72,4 @@ the status number as it comes off the wire.
 
 ## Known holes / open
 
-- **`UnknownRequestId` is never constructed.** `read_loop` drops a reply whose id nothing waits on
-  rather than failing anything ([request pairing](request-pairing.md)), so the variant is public and
-  unreachable.
+**None.**
