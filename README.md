@@ -1,4 +1,9 @@
-# justsftp
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/kihyun1998/justsftp/main/logo/png/justsftp-lockup-white.png">
+    <img src="https://raw.githubusercontent.com/kihyun1998/justsftp/main/logo/png/justsftp-lockup-black.png" alt="justsftp" width="560">
+  </picture>
+</p>
 
 [![crates.io](https://img.shields.io/crates/v/justsftp.svg)](https://crates.io/crates/justsftp)
 [![docs.rs](https://img.shields.io/docsrs/justsftp)](https://docs.rs/justsftp)

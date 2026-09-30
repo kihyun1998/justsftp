@@ -34,6 +34,16 @@ call when it moved out of PenTerm (PenTerm ADR-0089, *Amendment — the crate is
 - **Published docs carry no repository pointers.** The crate root's `//!` and every public item's
   `///` are rendered on docs.rs, where `docs/map/...` points nowhere. A pointer from a public item to
   its note is a plain `//` line; private modules' `//!` headers are not published.
+- **The logo is referenced by absolute `raw.githubusercontent.com/.../main/logo/...` URLs and is not
+  packaged.** `logo/` is outside `include`, so the `.crate` carries no images. crates.io rewrites a
+  relative `src` against `repository` but leaves `srcset` alone (crates.io's sanitizer is ammonia,
+  whose `is_url_attr` does not list `srcset`; rust-lang/crates.io `0498d51e`, rust-ammonia/ammonia
+  `4c7a8527`), so the README's dark-mode
+  `<picture>` source must be absolute; docs.rs renders the crate root rather than the README, so its
+  logo comes from `#![doc(html_logo_url, html_favicon_url)]`. The README uses the transparent
+  lockups, not the opaque `logo/readme/` banners, whose `#0d0d0d` background shows as a box on
+  GitHub's `#0d1117`. docs.rs uses the white-tile icon, because the plain black mark vanishes in its
+  dark and ayu themes. An image shows only once the commit is on `main`.
 - **The toolchain is pinned** (`rust-toolchain.toml`, 1.96.0) so local and CI builds match and a new
   Rust release cannot turn CI red on its own. `rust-version` in `Cargo.toml` states the same floor.
 - **A version is published with `cargo publish`** after the CI gates pass, with its `CHANGELOG.md`
@@ -43,6 +53,7 @@ call when it moved out of PenTerm (PenTerm ADR-0089, *Amendment — the crate is
 
 - `Cargo.toml`, `Cargo.lock`, `README.md`, `CHANGELOG.md`, `LICENSE-MIT`, `LICENSE-APACHE`,
   `rust-toolchain.toml`, `.gitignore`
+- `logo/` — the brand pack; its `README.md` says which file each surface uses
 - `src/lib.rs` — the crate docs and the public re-exports
 
 ## Reference behaviour
@@ -61,3 +72,4 @@ call when it moved out of PenTerm (PenTerm ADR-0089, *Amendment — the crate is
 ## Known holes / open
 
 - **No publish workflow.** A version is published by hand.
+- **The GitHub social preview has no API.** It is uploaded by hand under Settings → Social preview.

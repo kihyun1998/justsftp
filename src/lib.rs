@@ -97,6 +97,10 @@
 //! included.
 
 #![warn(missing_docs)]
+#![doc(
+    html_logo_url = "https://raw.githubusercontent.com/kihyun1998/justsftp/main/logo/icons/justsftp-icon-tile-256.png",
+    html_favicon_url = "https://raw.githubusercontent.com/kihyun1998/justsftp/main/logo/icons/justsftp-icon-tile-32.png"
+)]
 
 mod attrs;
 mod client;
