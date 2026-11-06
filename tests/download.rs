@@ -199,15 +199,6 @@ async fn the_pulled_offsets_advance_by_what_arrived() {
     assert_eq!(offsets, vec![0, 4, 12, 20]);
 }
 
-/// Dropping a `ReadFile` without `close` panics in a debug build.
-#[tokio::test]
-#[should_panic(expected = "close")]
-async fn dropping_without_closing_is_loud() {
-    let (session, _seen) = connect(vec![8]).await;
-    let open = session.read_file(b"/etc/nginx.conf").await.expect("open");
-    drop(open);
-}
-
 #[tokio::test]
 async fn a_whole_file_arrives_in_order_and_the_totals_are_cumulative() {
     let (session, _seen) = connect(vec![8, 8, 4]).await;

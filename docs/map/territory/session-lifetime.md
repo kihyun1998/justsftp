@@ -3,8 +3,8 @@
 ## What it is
 
 How a `Session` begins and ends: `Session::open` runs the handshake, spawns the reader and writer
-tasks and asks for the server's limits; `Session::close` drains and stops; `Drop` stops without
-draining. Plus the frame reader both the handshake and `read_loop` use.
+tasks and asks for the server's limits; `Session::close` drains and stops, waiting for the writer; `Drop` lets
+the writer drain and does not wait. Plus the frame reader both the handshake and `read_loop` use.
 
 ## Governing decisions
 

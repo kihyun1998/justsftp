@@ -10,9 +10,10 @@ how much moved and whether it was the whole file.
 
 ## Governing decisions
 
-No record in this repository. The maintainer's decision on pipelining and its reasons are on
-[#1](https://github.com/kihyun1998/justsftp/issues/1#issuecomment-6677251816), 2026-11-06, and are
-marked below.
+No record in this repository. The maintainer's decisions and their reasons are on
+[#1](https://github.com/kihyun1998/justsftp/issues/1#issuecomment-6677251816) (pipelining) and
+[#3](https://github.com/kihyun1998/justsftp/issues/3#issuecomment-6678954862) (closing on drop,
+`Closed`), 2026-11-06, and are marked below.
 
 ## Design model
 
@@ -52,8 +53,8 @@ marked below.
   **synchronous** `Feed`, which is enough when the source is a local file and not when the source must
   `await` — a remote-to-remote copy awaits the far side's read inside the loop. Pushing is the shape
   that lets an async source drive an async sink.
-- **With `ReadFile` and `WriteFile` the close is a request, not a structure**
-  ([every handle is closed](../invariant/every-handle-is-closed.md)).
+- **`close` reports; `OpenHandle` guarantees.** Each open type holds an `OpenHandle`, whose `Drop` queues
+  one `CLOSE` unless `close` has begun ([every handle is closed](../invariant/every-handle-is-closed.md)).
 - **`write_file` creates and truncates.** Opening without `TRUNCATE` leaves the tail of a longer
   previous file behind — a corrupt destination that reports success: every write returns `Ok` and the
   file is simply too long, and nothing downstream can notice.
@@ -122,10 +123,14 @@ marked below.
   `chunk_len` is `NonZeroU32`, so no check is needed for a queue that could never be sent or a read that
   could never advance.
 - **Both `close`s wait before they send `CLOSE`, unlike every other close here.** Dropped while waiting,
-  they send none, so `closed` is set only once the wait is over and the drop assertion still fires. A
-  caller bounding one with an outer timeout leaks the handle.
-- **The drop assertions stay quiet during a panic.** A second panic aborts the process, which turned
-  one failing test into a run with no results.
+  `CLOSE` goes out at once from `OpenHandle`'s `Drop`, so an outer timeout on either does not leak. None
+  is built in (#3). On `WriteBehind` it does lose `Closed` and with it the resume point. A caller needing
+  both bounds `flush`, reads `acknowledged` and drops the value; calling `close` afterwards would wait for
+  the same writes again. Whether that is enough was not decided.
+- **`WriteBehind::close` returns `Closed`, not a `Result`** (maintainer, 2026-11-06,
+  [#3](https://github.com/kihyun1998/justsftp/issues/3#issuecomment-6678954862)). It consumes the value, so
+  a failure reported any other way would take the resume point with it. The other `close`s keep
+  `Result<()>`, as `ReadAhead` has no resume point beyond `offset`.
 - **Against OpenSSH 9.6 through a relay at RTT 30 ms and 1 Gbit/s**, measured 2026-11-06 on the final
   code, median MB/s of 3 runs: `ReadAhead` 7.8 at depth 1, 30.5 at 4, 33.7 at 8, 33.7 at 16, and 106.6 at
   64 with a 16 MiB window; `WriteBehind` 7.7, 30.5, 57.9, 50.7, where depth 16 ranged from 47.2 to 60.8.
@@ -142,16 +147,16 @@ marked below.
 
 ## Code
 
-- `src/client.rs` — `Download`, `Session::read`, `Session::read_file`, `Session::read_file_from`,
-  `Session::read_file_watched`, `ReadFile` (`next`, `server_read_len`, `close`, `Drop`), `WriteFile`
-  (`write`, `written`, `close`, `Drop`), `Feed`, `Upload`, `Session::write_file`,
+- `src/client.rs` — `OpenHandle`, `Download`, `Session::read`, `Session::read_file`, `Session::read_file_from`,
+  `Session::read_file_watched`, `ReadFile` (`next`, `server_read_len`, `close`), `WriteFile`
+  (`write`, `written`, `close`), `Feed`, `Upload`, `Session::write_file`,
   `Session::overwrite_file`, `Session::write_file_from`, `Session::write_file_watched`,
   `Session::write`
 - `src/pipeline.rs` — `ReadAhead` (`next`, `offset`, `close`), `WriteBehind` (`write`, `flush`,
-  `acknowledged`, `offset`, `max_chunk`, `close`), `Session::read_file_ahead`,
+  `acknowledged`, `offset`, `max_chunk`, `close`), `Closed`, `Session::read_file_ahead`,
   `Session::read_file_ahead_from`, `Session::read_file_ahead_watched`, `Session::write_file_behind`,
   `Session::write_file_behind_from`
-- `tests/download.rs`, `tests/upload.rs`, `tests/pipelined.rs`
+- `tests/download.rs`, `tests/upload.rs`, `tests/pipelined.rs`, `tests/dropping.rs`
 
 ## Reference behaviour
 
@@ -160,7 +165,8 @@ marked below.
   (R46 to R51). `russh-sftp` pipelines writes only (R53). Each was read for
   [#1](https://github.com/kihyun1998/justsftp/issues/1). The refusal of a reply longer than asked and
   the contiguous offset follow OpenSSH; the front-of-queue wait does not, and writes are shaped like
-  `russh-sftp`'s oldest-ack wait, with clocks it does not have.
+  `russh-sftp`'s oldest-ack wait, with clocks it does not have. A drop queuing `CLOSE` is `russh-sftp`'s
+  too (R55).
 
 ## Cross-cutting invariants
 
@@ -190,10 +196,14 @@ marked below.
 
 - **What a ramp would save on many small files is unmeasured**, and so is whether shrinking requests
   would recover what a server short on every request costs at a real RTT.
-- **`close` can lose the resume point.** It consumes the value, and a caller that writes and then closes
-  gets the failure with no `acknowledged` to read; it must `flush` first, which only a doc comment says.
-- **`close` has no overall deadline.** A server answering just inside each budget can hold it for
-  `depth` times the two budgets.
+- **An `OPEN` nobody is left to answer leaks its handle.** With the future dropped, or gone with `Timeout`
+  or `WriteTimeout`, the server still opens the file, and `read_loop` holds the handle in the reply and
+  discards it as one nobody waits for. Measured against OpenSSH 9.6, 2026-11-06: 12,000 such
+  drops left it refusing new opens on the code before and after #3, where dropping an open file 12,000
+  times now does not (before, it refused at 10,237; limit stated 10,235). By reading, the same holds for
+  `OPENDIR` and `Session::open_file`, and `russh-sftp` does the same.
+- **`close` has no overall deadline of its own.** A server answering just inside each budget can hold it
+  for `depth` times the two budgets; a caller bounds it from outside.
 - **A length of 0 is still accepted on the older paths.** `ReadAhead`'s `chunk_len` is a `NonZeroU32`, but
   `read_file_watched` and `ReadFile::next` take a `u32`: answered with `EOF`, 0 reports a complete empty
   file, and answered with empty `DATA`, empty chunks forever. Changing them is a breaking change.

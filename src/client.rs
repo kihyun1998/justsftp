@@ -34,6 +34,49 @@ pub struct Download {
     pub stopped: bool,
 }
 
+/// A server handle this crate opened and has not yet closed. Dropped before [`Self::close`] has
+/// run, it queues one `SSH_FXP_CLOSE` and leaves the reply to be discarded
+/// (docs/map/invariant/every-handle-is-closed.md).
+pub(crate) struct OpenHandle<'a> {
+    session: &'a Session,
+    handle: Handle,
+    closed: bool,
+}
+
+impl<'a> OpenHandle<'a> {
+    pub(crate) fn new(session: &'a Session, handle: Handle) -> Self {
+        Self {
+            session,
+            handle,
+            closed: false,
+        }
+    }
+
+    pub(crate) fn session(&self) -> &'a Session {
+        self.session
+    }
+
+    pub(crate) fn handle(&self) -> &Handle {
+        &self.handle
+    }
+
+    /// Sends `SSH_FXP_CLOSE` on its first poll and waits for the reply.
+    pub(crate) async fn close(mut self) -> Result<()> {
+        self.closed = true;
+        self.session.close_handle(&self.handle).await
+    }
+}
+
+impl Drop for OpenHandle<'_> {
+    fn drop(&mut self) {
+        if !self.closed {
+            let _ = self.session.enqueue(Request::Close {
+                handle: self.handle.clone(),
+            });
+        }
+    }
+}
+
 impl Session {
     /// Canonicalises a path, as bytes. Also the way to learn the remote home directory: v3 servers
     /// resolve `.` to it.
@@ -89,18 +132,20 @@ impl Session {
     /// `on_batch` is handed the batch that just landed and the **running total** read so far, and
     /// answers whether to keep going. It runs only when a batch lands, so a stop waits up to one
     /// round trip; answering [`Walk::Stop`] sends no further request. The handle is closed whichever
-    /// way the walk ends — at `EOF`, on a failure, or on a stop. SFTP has no way to ask how many
-    /// entries a directory holds, so there is no total to report against.
+    /// way the walk ends — at `EOF`, on a failure, or on a stop, and when this future is dropped once
+    /// the directory is open; dropped while the open is due, the server keeps a handle nothing can
+    /// close. SFTP has no way to ask how many entries a directory holds, so there is
+    /// no total to report against.
     pub async fn list_dir_watched(
         &self,
         path: &[u8],
         on_batch: &mut (dyn FnMut(&[DirEntry], usize) -> Walk + Send),
     ) -> Result<Listing> {
-        let handle = self.open_dir(path).await?;
+        let dir = OpenHandle::new(self, self.open_dir(path).await?);
         let mut all = Vec::new();
         let mut stopped = false;
         let walk = async {
-            while let Some(batch) = self.read_dir(&handle).await? {
+            while let Some(batch) = self.read_dir(dir.handle()).await? {
                 let from = all.len();
                 all.extend(batch);
                 if on_batch(&all[from..], all.len()) == Walk::Stop {
@@ -113,7 +158,7 @@ impl Session {
         .await;
 
         // Closed whichever way the walk ended (docs/map/invariant/every-handle-is-closed.md).
-        let closed = self.close_handle(&handle).await;
+        let closed = dir.close().await;
         walk?;
         closed?;
         Ok(Listing {
@@ -122,7 +167,8 @@ impl Session {
         })
     }
 
-    /// Opens a file. An empty attributes block is always sent.
+    /// Opens a file. An empty attributes block is always sent. Close the handle with
+    /// [`Self::close_handle`]: unlike [`ReadFile`] and [`WriteFile`], a [`Handle`] does not close itself.
     // The empty block is mandatory in § 6.3 and some servers refuse `open` without it — not stale:
     // docs/map/territory/path-verbs.md.
     pub async fn open_file(&self, path: &[u8], flags: OpenFlags) -> Result<Handle> {
@@ -177,10 +223,8 @@ impl Session {
     pub async fn read_file_from(&self, path: &[u8], offset: u64) -> Result<ReadFile<'_>> {
         let handle = self.open_file(path, OpenFlags::READ).await?;
         Ok(ReadFile {
-            session: self,
-            handle,
+            open: OpenHandle::new(self, handle),
             offset,
-            closed: false,
         })
     }
 
@@ -192,7 +236,8 @@ impl Session {
     /// answering [`Walk::Stop`] sends no further request. Nothing is
     /// written anywhere and nothing is kept: the bytes are the callback's. A short read is not
     /// treated as the end; only the server's `EOF` is. A zero-length `DATA` reply is passed on as
-    /// an empty chunk.
+    /// an empty chunk. Dropping this future also closes the handle, once the file is open, and reports
+    /// nothing; dropped while the open is due, the server keeps a handle nothing can close.
     pub async fn read_file_watched(
         &self,
         path: &[u8],
@@ -229,20 +274,23 @@ impl Session {
 /// itself drive a loop, such as a remote-to-remote copy. Prefer
 /// [`Session::read_file_watched`] wherever the destination is passive.
 ///
-/// ⚠️ **[`Self::close`] must be called.** `Drop` cannot close an SFTP handle, so it only fires a
-/// `debug_assert!`; in release a forgotten close leaks the server handle.
+/// **Call [`Self::close`] to learn how the close went.** Dropped without it, the handle is still
+/// closed, and a failure of that close goes unseen.
 pub struct ReadFile<'a> {
-    session: &'a Session,
-    handle: Handle,
+    open: OpenHandle<'a>,
     offset: u64,
-    closed: bool,
 }
 
 impl ReadFile<'_> {
     /// The next chunk of up to `len` bytes, or `None` at end of file. A short chunk is not the end.
     /// The offset advances by what arrived.
     pub async fn next(&mut self, len: u32) -> Result<Option<Vec<u8>>> {
-        match self.session.read(&self.handle, self.offset, len).await? {
+        match self
+            .open
+            .session()
+            .read(self.open.handle(), self.offset, len)
+            .await?
+        {
             Some(data) => {
                 self.offset += data.len() as u64;
                 Ok(Some(data))
@@ -253,22 +301,12 @@ impl ReadFile<'_> {
 
     /// The server's stated read length ([`Session::server_read_len`]).
     pub fn server_read_len(&self) -> Option<u32> {
-        self.session.server_read_len()
+        self.open.session().server_read_len()
     }
 
-    /// Hands the handle back to the server. **Must be called.**
-    pub async fn close(mut self) -> Result<()> {
-        self.closed = true;
-        self.session.close_handle(&self.handle).await
-    }
-}
-
-impl Drop for ReadFile<'_> {
-    fn drop(&mut self) {
-        debug_assert!(
-            self.closed || std::thread::panicking(),
-            "a ReadFile was dropped without close() — the server handle is leaked. `close_handle` is async and Drop cannot await, so this assertion is the only thing standing between a forgotten close and a server that quietly stops opening files."
-        );
+    /// Hands the handle back to the server and reports how that went.
+    pub async fn close(self) -> Result<()> {
+        self.open.close().await
     }
 }
 
@@ -276,19 +314,20 @@ impl Drop for ReadFile<'_> {
 /// `await` between chunks, such as a remote-to-remote copy. The mirror of [`ReadFile`]; prefer
 /// [`Session::write_file_watched`] where a synchronous [`Feed`] will do.
 ///
-/// ⚠️ **[`Self::close`] must be called**, for the same reason as on [`ReadFile`].
+/// **Call [`Self::close`] to learn how the close went**, as on [`ReadFile`].
 pub struct WriteFile<'a> {
-    session: &'a Session,
-    handle: Handle,
+    open: OpenHandle<'a>,
     offset: u64,
-    closed: bool,
 }
 
 impl WriteFile<'_> {
     /// Writes `data` at the current offset: all of it, or an error. `data` may not exceed
     /// [`Self::max_chunk`].
     pub async fn write(&mut self, data: &[u8]) -> Result<()> {
-        self.session.write(&self.handle, self.offset, data).await?;
+        self.open
+            .session()
+            .write(self.open.handle(), self.offset, data)
+            .await?;
         self.offset += data.len() as u64;
         Ok(())
     }
@@ -302,22 +341,12 @@ impl WriteFile<'_> {
     /// smaller of what fits the outbound packet with this file's handle and the server's stated
     /// write bound, if any. It depends on the handle's length, so it is per file.
     pub fn max_chunk(&self) -> usize {
-        self.session.max_write_len(&self.handle)
+        self.open.session().max_write_len(self.open.handle())
     }
 
-    /// Hands the handle back. **Must be called.**
-    pub async fn close(mut self) -> Result<()> {
-        self.closed = true;
-        self.session.close_handle(&self.handle).await
-    }
-}
-
-impl Drop for WriteFile<'_> {
-    fn drop(&mut self) {
-        debug_assert!(
-            self.closed || std::thread::panicking(),
-            "a WriteFile was dropped without close() — the server handle is leaked. `close_handle` is async and Drop cannot await, so this assertion is the only thing standing between a forgotten close and a server that quietly stops opening files."
-        );
+    /// Hands the handle back and reports how that went.
+    pub async fn close(self) -> Result<()> {
+        self.open.close().await
     }
 }
 
@@ -355,10 +384,8 @@ impl Session {
             )
             .await?;
         Ok(WriteFile {
-            session: self,
-            handle,
+            open: OpenHandle::new(self, handle),
             offset: 0,
-            closed: false,
         })
     }
 
@@ -371,10 +398,8 @@ impl Session {
             .open_file(path, OpenFlags::WRITE | OpenFlags::TRUNCATE)
             .await?;
         Ok(WriteFile {
-            session: self,
-            handle,
+            open: OpenHandle::new(self, handle),
             offset: 0,
-            closed: false,
         })
     }
 
@@ -388,10 +413,8 @@ impl Session {
             .open_file(path, OpenFlags::WRITE | OpenFlags::CREATE)
             .await?;
         Ok(WriteFile {
-            session: self,
-            handle,
+            open: OpenHandle::new(self, handle),
             offset,
-            closed: false,
         })
     }
 
@@ -400,7 +423,9 @@ impl Session {
     ///
     /// `next` is asked for up to `chunk_len` bytes each time and answers with a [`Feed`]; the caller
     /// sizes `chunk_len`, for example by [`WriteFile::max_chunk`]. Each write is all or an error,
-    /// so the count in [`Upload`] is exact. An endless run of empty `Feed::Bytes` loops.
+    /// so the count in [`Upload`] is exact. An endless run of empty `Feed::Bytes` loops. Dropping this
+    /// future also closes the handle, once the file is open, and reports nothing; dropped while the
+    /// open is due, the server keeps a handle nothing can close.
     pub async fn write_file_watched(
         &self,
         path: &[u8],

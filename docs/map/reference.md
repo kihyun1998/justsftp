@@ -58,6 +58,7 @@ To re-check a row, fetch the crate with
 | R34 | `src/client/rawsession.rs:212-216` | `request()` enqueues, then starts the reply timeout — the clock includes the write. |
 | R29 | `src/client/rawsession.rs:239-246` | `init()` goes through the same timed `request` path. |
 | E5 | `src/client/rawsession.rs:380` | `write_nowait` returns the reply receiver; `File`'s write path calls it. |
+| R55 | `src/client/fs/file.rs:146-154`, `src/client/rawsession.rs:317-323` | `impl Drop for File` calls `close_nowait` unless already closed; it sends `CLOSE` and hands back a receiver nobody keeps. |
 | R53 | `src/client/fs/file.rs:181-182`, `:277-281` | `poll_read` awaits one `read` at a time; `poll_write` waits on the oldest ack only at `max_concurrent_writes`. |
 
 ### Issues and commits

@@ -164,15 +164,6 @@ async fn a_caller_can_push_chunks_one_at_a_time() {
     assert_eq!(session.in_flight(), 0);
 }
 
-/// Dropping a `WriteFile` without `close` panics in a debug build.
-#[tokio::test]
-#[should_panic(expected = "close")]
-async fn dropping_a_writer_without_closing_is_loud() {
-    let (session, _seen) = connect().await;
-    let open = session.write_file(b"/srv/out.txt").await.expect("open");
-    drop(open);
-}
-
 /// A caller with nothing to send still opens, writes nothing, and closes.
 #[tokio::test]
 async fn an_empty_file_writes_nothing_and_still_closes() {
@@ -347,7 +338,6 @@ async fn the_ceiling_leaves_room_for_this_file_s_handle() {
     // A 4-byte handle, as OpenSSH's. 25 = length prefix(4) + type(1) + id(4) + handle length
     // prefix(4) + offset(8) + data length prefix(4).
     let ceiling = w.max_chunk();
-    // Closed although nothing was written; `WriteFile` asserts on it.
     w.close().await.expect("close");
 
     assert_eq!(

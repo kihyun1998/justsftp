@@ -574,15 +574,6 @@ async fn reading_ahead_from_an_offset_starts_there() {
     tokio::join!(client, server);
 }
 
-#[tokio::test]
-#[should_panic(expected = "ReadAhead was dropped without close()")]
-async fn dropping_a_read_ahead_without_closing_is_loud() {
-    let (session, mut far) = connect().await;
-    let client = session.read_file_ahead(b"/f", chunk(), depth(1));
-    let (r, ()) = tokio::join!(client, far.open());
-    drop(r.unwrap());
-}
-
 // ── the watched read ──
 
 #[tokio::test(start_paused = true)]
@@ -653,7 +644,7 @@ async fn writes_return_up_to_depth_and_the_next_waits_for_the_oldest() {
         assert_eq!((w.offset(), w.acknowledged()), (200, 0));
         w.write(SOME).await.unwrap();
         assert_eq!((w.offset(), w.acknowledged()), (300, 100));
-        w.close().await.unwrap();
+        w.close().await.result.unwrap();
     };
     let server = async {
         far.open().await;
@@ -693,7 +684,7 @@ async fn acknowledged_stays_contiguous_when_replies_land_out_of_order() {
         );
         w.flush().await.unwrap();
         assert_eq!((w.offset(), w.acknowledged()), (400, 400));
-        w.close().await.unwrap();
+        w.close().await.result.unwrap();
     };
     let server = async {
         far.open().await;
@@ -738,7 +729,8 @@ async fn a_failed_write_keeps_the_resume_point_before_the_hole() {
         assert_eq!(w.offset(), 300, "a refused write moved nothing");
 
         let closed = w.close().await;
-        assert!(is_failure(&closed), "{closed:?}");
+        assert_eq!(closed.acknowledged, 100);
+        assert!(is_failure(&closed.result), "{closed:?}");
     };
     let server = async {
         far.open().await;
@@ -785,7 +777,7 @@ async fn close_waits_for_the_writes_still_due() {
     let client = async {
         let mut w = session.write_file_behind(b"/f", depth(2)).await.unwrap();
         w.write(SOME).await.unwrap();
-        w.close().await.unwrap();
+        w.close().await.result.unwrap();
     };
     let server = async {
         far.open().await;
@@ -808,7 +800,7 @@ async fn a_dropped_flush_loses_nothing() {
         assert!(waited.is_err(), "the reply has not been sent yet");
         w.flush().await.unwrap();
         assert_eq!(w.acknowledged(), 100);
-        w.close().await.unwrap();
+        w.close().await.result.unwrap();
     };
     let server = async {
         far.open().await;
@@ -833,7 +825,7 @@ async fn a_chunk_past_the_ceiling_is_refused_and_the_file_goes_on() {
         assert!(matches!(refused, Err(Error::TooLong { .. })), "{refused:?}");
         assert_eq!(w.offset(), 0);
         w.write(&vec![0; 262_118]).await.unwrap();
-        w.close().await.unwrap();
+        w.close().await.result.unwrap();
     };
     let server = async {
         far.open().await;
@@ -861,7 +853,7 @@ async fn the_write_clock_runs_from_the_front_of_the_queue() {
             w.write(SOME).await.unwrap();
         }
         w.flush().await.expect("each write is within its budget");
-        w.close().await.unwrap();
+        w.close().await.result.unwrap();
     };
     let server = async {
         far.open().await;
@@ -881,7 +873,7 @@ async fn a_new_file_is_created_and_truncated() {
 
     let client = async {
         let w = session.write_file_behind(b"/f", depth(1)).await.unwrap();
-        w.close().await.unwrap();
+        w.close().await.result.unwrap();
     };
     let server = async {
         let open = far.frame_of(OPEN).await;
@@ -906,7 +898,7 @@ async fn resuming_keeps_the_file_and_starts_at_the_offset() {
         w.write(SOME).await.unwrap();
         w.flush().await.unwrap();
         assert_eq!(w.acknowledged(), 600);
-        w.close().await.unwrap();
+        w.close().await.result.unwrap();
     };
     let server = async {
         let open = far.frame_of(OPEN).await;
@@ -924,34 +916,6 @@ async fn resuming_keeps_the_file_and_starts_at_the_offset() {
     tokio::join!(client, server);
 }
 
-#[tokio::test]
-#[should_panic(expected = "WriteBehind was dropped without close()")]
-async fn dropping_a_write_behind_without_closing_is_loud() {
-    let (session, mut far) = connect().await;
-    let client = session.write_file_behind(b"/f", depth(1));
-    let (w, ()) = tokio::join!(client, far.open());
-    drop(w.unwrap());
-}
-
-/// A `close` dropped before its writes settle sends no `CLOSE`, so it must not read as closed.
-#[tokio::test(start_paused = true)]
-#[should_panic(expected = "WriteBehind was dropped without close()")]
-async fn a_close_dropped_before_its_writes_settle_is_loud() {
-    let (session, mut far) = connect().await;
-
-    let client = async {
-        let mut w = session.write_file_behind(b"/f", depth(2)).await.unwrap();
-        w.write(SOME).await.unwrap();
-        let _ = tokio::time::timeout(Duration::from_millis(10), w.close()).await;
-    };
-    let server = async {
-        far.open().await;
-        far.frame_of(WRITE).await;
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    };
-    tokio::join!(client, server);
-}
-
 /// A `write` dropped while waiting for room queues nothing, so the same data can be written again.
 #[tokio::test(start_paused = true)]
 async fn a_dropped_write_queues_nothing() {
@@ -965,7 +929,7 @@ async fn a_dropped_write_queues_nothing() {
         assert_eq!(w.offset(), 100);
         w.write(SOME).await.unwrap();
         assert_eq!(w.offset(), 200);
-        w.close().await.unwrap();
+        w.close().await.result.unwrap();
     };
     let server = async {
         far.open().await;
@@ -1018,7 +982,7 @@ async fn a_write_that_cannot_reach_the_stream_stops_the_next_one() {
         other => panic!("expected the write's cause, got {other:?}"),
     }
     assert_eq!((w.offset(), w.acknowledged()), (100, 0));
-    assert!(w.close().await.is_err());
+    assert!(w.close().await.result.is_err());
     drop(writes);
 }
 
@@ -1112,29 +1076,6 @@ async fn a_stop_on_a_slow_link_still_says_it_stopped() {
     let (d, ()) = tokio::join!(client, server);
     let d = d.expect("a stop is not a timeout");
     assert_eq!((d.bytes, d.stopped), (100, true));
-}
-
-/// A dropped `close` with replies due sends no `CLOSE`, so it must not read as closed.
-#[tokio::test(start_paused = true)]
-#[should_panic(expected = "ReadAhead was dropped without close()")]
-async fn a_read_close_dropped_before_its_replies_land_is_loud() {
-    let (session, mut far) = connect().await;
-
-    let client = async {
-        let mut r = session
-            .read_file_ahead(b"/f", chunk(), depth(2))
-            .await
-            .unwrap();
-        r.next().await.unwrap().unwrap();
-        let _ = tokio::time::timeout(Duration::from_millis(10), r.close()).await;
-    };
-    let server = async {
-        far.open().await;
-        let reads = far.reads(2).await;
-        far.answer(&reads[0]).await;
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    };
-    tokio::join!(client, server);
 }
 
 /// An empty file: `EOF` at the front, the callback never told, and the handle closed.
@@ -1263,4 +1204,78 @@ async fn a_panic_holding_a_write_file_is_not_a_second_panic() {
     let (w, ()) = tokio::join!(session.write_file(b"/f"), far.open());
     let _open = w.unwrap();
     panic!("the caller's own failure");
+}
+
+/// With no `flush` first, `close` still says where to resume after a failure, and `CLOSE` still goes.
+#[tokio::test(start_paused = true)]
+async fn close_with_no_flush_reports_the_resume_point_and_the_failure() {
+    let (session, mut far) = connect().await;
+
+    let client = async {
+        let mut w = session.write_file_behind(b"/f", depth(3)).await.unwrap();
+        for _ in 0..3 {
+            w.write(SOME).await.unwrap();
+        }
+        w.close().await
+    };
+    let server = async {
+        far.open().await;
+        let a = far.frame_of(WRITE).await;
+        let b = far.frame_of(WRITE).await;
+        let c = far.frame_of(WRITE).await;
+        far.status(a.id, FX_OK).await;
+        far.status(b.id, FX_FAILURE).await;
+        far.close().await;
+        far.status(c.id, FX_OK).await;
+    };
+    let (closed, ()) = tokio::join!(client, server);
+    assert_eq!(closed.acknowledged, 100, "before the failed write");
+    assert!(
+        matches!(&closed.result, Err(Error::Status(s)) if s.code == StatusCode::Failure),
+        "{closed:?}"
+    );
+}
+
+/// A clean `close` reports everything acknowledged, with one `CLOSE`.
+#[tokio::test(start_paused = true)]
+async fn a_clean_close_reports_everything_acknowledged() {
+    let (session, mut far) = connect().await;
+
+    let client = async {
+        let mut w = session.write_file_behind(b"/f", depth(2)).await.unwrap();
+        w.write(SOME).await.unwrap();
+        w.close().await
+    };
+    let server = async {
+        far.open().await;
+        let a = far.frame_of(WRITE).await;
+        far.status(a.id, FX_OK).await;
+        far.close().await;
+        far.silent().await;
+    };
+    let (closed, ()) = tokio::join!(client, server);
+    assert_eq!(closed.acknowledged, 100);
+    closed.result.unwrap();
+}
+
+/// A `CLOSE` the server refuses, after writes it accepted, is in `result` with the offset intact.
+#[tokio::test(start_paused = true)]
+async fn a_refused_close_is_reported_with_the_offset_intact() {
+    let (session, mut far) = connect().await;
+
+    let client = async {
+        let mut w = session.write_file_behind(b"/f", depth(1)).await.unwrap();
+        w.write(SOME).await.unwrap();
+        w.close().await
+    };
+    let server = async {
+        far.open().await;
+        let a = far.frame_of(WRITE).await;
+        far.status(a.id, FX_OK).await;
+        let c = far.frame_of(CLOSE).await;
+        far.status(c.id, FX_FAILURE).await;
+    };
+    let (closed, ()) = tokio::join!(client, server);
+    assert_eq!(closed.acknowledged, 100);
+    assert!(matches!(closed.result, Err(Error::Status(_))), "{closed:?}");
 }

@@ -84,14 +84,12 @@
 //! println!("{} bytes read", download.bytes);
 //!
 //! let mut out = session.write_file_behind(b"/srv/copy.pdf", depth).await?;
-//! let mut sent = out.write(b"queued, not yet acknowledged").await;
-//! if sent.is_ok() {
-//!     sent = out.flush().await;
+//! let queued = out.write(b"queued, not yet acknowledged").await;
+//! let closed = out.close().await;
+//! if queued.is_err() || closed.result.is_err() {
+//!     println!("resume from {}, not from the file's size", closed.acknowledged);
 //! }
-//! if sent.is_err() {
-//!     println!("resume from {}, not from the file's size", out.acknowledged());
-//! }
-//! out.close().await
+//! # Ok(())
 //! # }
 //! ```
 //!
@@ -150,7 +148,7 @@ mod wire;
 pub use attrs::{AttrsUpdate, Extension, FileAttributes, FileType};
 pub use client::{Download, Feed, Listing, ReadFile, Upload, Walk, WriteFile};
 pub use error::{Error, Result, Status, StatusCode};
-pub use pipeline::{ReadAhead, WriteBehind};
+pub use pipeline::{Closed, ReadAhead, WriteBehind};
 pub use protocol::{
     DirEntry, Handle, OpenFlags, Request, Response, ServerLimits, ServerVersion, VERSION,
 };

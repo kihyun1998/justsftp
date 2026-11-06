@@ -41,7 +41,7 @@ is learned.
 ## Code
 
 - `src/client.rs` — `Walk`, `Listing`, `Session::real_path`, `Session::open_dir`,
-  `Session::read_dir`, `Session::list_dir`, `Session::list_dir_watched`
+  `Session::read_dir`, `Session::list_dir`, `Session::list_dir_watched` (through `OpenHandle`)
 - `tests/walk.rs`
 
 ## Reference behaviour
@@ -65,6 +65,8 @@ is learned.
 
 ## Known holes / open
 
+- **A walk dropped while `OPENDIR` is due leaks its handle**, as an `OPEN` does
+  ([every handle is closed](../invariant/every-handle-is-closed.md)).
 - **Nothing bounds a listing's size.** `list_dir_watched` keeps every entry in `Listing::entries`, and
   a server that never answers `EOF` grows it until the caller answers `Walk::Stop`. `list_dir` has no
   callback and cannot stop. Each batch is bounded by `Config::max_inbound_packet`; their number is

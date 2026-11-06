@@ -3,38 +3,48 @@
 ## The fact
 
 Every loop this crate runs over a handle closes it whichever way the loop ends — at `EOF`, on a
-failure, **and on a stop**. Where the caller drives the handle through `ReadFile`, `WriteFile`,
-`ReadAhead` or `WriteBehind`, the close is a request the caller must make, and forgetting it fails a debug build. A raw `Handle`
-from `open_dir`, `open_file` or `open_file_with` is the caller's to close with `close_handle`.
+failure, **on a stop, and when its future is dropped**. `ReadFile`, `WriteFile`, `ReadAhead` and
+`WriteBehind` close on `close` or, failing that, on drop, exactly once, so `close` is how a caller learns
+the result rather than what prevents a leak. A raw `Handle` from `open_dir`, `open_file` or
+`open_file_with` stays the caller's to close with `close_handle`: it is a public, cloneable value, and
+nothing can tell which copy is the last.
+
+**This does not hold while an `OPEN` or `OPENDIR` is due and nobody is left to receive its reply**: a
+future dropped then, or one that gave up with `Timeout` or `WriteTimeout`. The server has opened it, and
+`read_loop` discards the handle in the reply. Against OpenSSH 9.6, 12,000 such drops left the server
+refusing new opens, on this code as on the code before it, past its stated limit of 10,235
+([file transfer](../territory/file-transfer.md)).
 
 ## Why it is cross-cutting
 
 `list_dir_watched`, `read_file_watched`, `read_file_ahead_watched` and `write_file_watched` do not
 call each other, and
-`close_handle` cannot hold this: the fact is that each loop reaches it on every exit path, which each
-loop arranges separately. `Session::close` is the far end of the same fact, in another territory.
+`close_handle` cannot hold this: the fact is that each loop reaches it on every exit path. `OpenHandle`
+holds the drop path and the once-only rule for all of them; what each loop still arranges is reaching
+`close` and reporting its result. `Session::close` is the far end of the same fact, in another territory.
 
 - **A server has a finite number of open handles**, and leaking one per listing or transfer
   exhausts them. A user who stops several slow listings or cancels several large downloads would
   strand one each time — invisible from the client's side, and it surfaces on the server as a limit
   nobody can attribute.
-- **Rust has no async drop.** `close_handle` is `async`, so `Drop` cannot do the work. What `Drop`
-  can do is refuse to be quiet: `ReadFile` and `WriteFile` fire a `debug_assert!`, so forgetting is
-  a failing test rather than a server that stops opening files after a few hundred transfers. In
-  release it is a leak, which is what it would have been anyway.
+- **Rust has no async drop, and closing does not need one.** `Drop` cannot wait for a reply, but
+  `Session::enqueue` is synchronous and the writer task sends the packet, so `Drop` queues `CLOSE` and
+  the reply is discarded (maintainer, 2026-11-06,
+  [#3](https://github.com/kihyun1998/justsftp/issues/3#issuecomment-6678954862); R55). A debug assertion
+  used to stand in its place, which panicked when a caller's future was dropped and leaked in release.
+  What this gives up: forgetting `close` is no longer loud, and a failure of that `CLOSE` goes unseen.
 - **A stop is answered only when a batch or chunk lands**, so it waits up to one round trip, and on
-  `ReadAhead` also for the replies already due;
-  ending the loop sooner would mean dropping the future, which skips the close. Once answered, no
-  further request goes out.
+  `ReadAhead` also for the replies already due. Ending the loop sooner by dropping the future also
+  closes, but reports nothing. Once answered, no further request goes out.
 
 ## Territories it holds in
 
 - [Listing](../territory/listing.md) — `list_dir_watched` closes after the walk, then reports the
   walk's error, then the close's.
 - [File transfer](../territory/file-transfer.md) — `read_file_watched` and `write_file_watched` are
-  built on `ReadFile` / `WriteFile`, so there is **one** place each kind of handle is closed.
-  `read_file_ahead_watched` is built on `ReadAhead`, whose `close` is a second place; `WriteBehind`'s
-  `close` closes whichever way its flush ends.
+  built on `ReadFile` / `WriteFile`, and `read_file_ahead_watched` on `ReadAhead`; all of them hold an
+  `OpenHandle`, the one place a handle is closed. `WriteBehind`'s `close` closes whichever way its flush
+  ends.
 - [Session lifetime](../territory/session-lifetime.md) — `Session::close` drains the writer's queue
   rather than discarding it; the packet most likely to be sitting there is the `SSH_FXP_CLOSE` a
   listing queued.
@@ -44,14 +54,17 @@ loop arranges separately. `Session::close` is the far end of the same fact, in a
 ## What a violation looks like
 
 The server refuses new opens after enough transfers or stopped listings, with nothing on the client
-to say why. In a debug build, a dropped `ReadFile` or `WriteFile` panics on its assertion. A dropped
-watched-loop future skips the close too, which is why a caller stops by answering `Walk::Stop` rather
-than by dropping it: PenTerm's walk says so (`sftp-transfer`, PenTerm `2aec7cd40`, 2026-11-06).
+to say why. Two `CLOSE`s for one handle would be the opposite failure, and `tests/dropping.rs` counts
+them. PenTerm's walk stops by answering `Walk::Stop` rather than dropping the future, which remains the
+way to get a result (`sftp-transfer`, PenTerm `2aec7cd40`, 2026-11-06); its commands' futures are also
+dropped when a pane or window closes (`explorer_remote_open.rs`, same commit).
 
 ## Discovery history
 
 - Carried from PenTerm's comments (commit `88f4108`, 2026-09-30). `the_ceiling_leaves_room_for_this_file_s_handle`
-  once forgot its close and the drop assertion caught it ([verification](../territory/verification.md)).
+  once forgot its close and the drop assertion caught it, before that assertion went for
+  [#3](https://github.com/kihyun1998/justsftp/issues/3#issuecomment-6678954862), which reproduced the leak
+  in a release build.
 
 ## Where it will recur
 

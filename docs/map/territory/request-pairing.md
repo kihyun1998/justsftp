@@ -100,7 +100,8 @@ recoverable by a later change.
 - **Cancelling a request stops the wait, not the request.** Once `enqueue` returns, the packet goes
   out whole whatever the caller does; `a_cancelled_request_does_not_leave_half_a_packet_on_the_wire`
   asserts it. A cancelled `WRITE` or `REMOVE`, and one that reported `Timeout` or `WriteTimeout`, may
-  therefore still happen on the server, and the caller cannot tell. The reply is dropped by the
+  therefore still happen on the server, and the caller cannot tell; a cancelled `OPEN` leaves a handle
+  open there ([file transfer](file-transfer.md)). The reply is dropped by the
   no-waiter rule above.
 - **`enqueue` is split out of `request` for pipelining.** Pipelined file I/O needs a dispatch that
   returns the reply receiver without awaiting anything, so a caller can keep N requests outstanding
@@ -112,6 +113,7 @@ recoverable by a later change.
   adds is a send order the caller controls, since a request sends on its first poll. It stays private
   to the crate; `ReadAhead` and `WriteBehind` hold what it returns, a `Sent`, and wait through
   `reply_to`, which `request` also uses (maintainer's decision, [file transfer](file-transfer.md)).
+  `OpenHandle`'s `Drop` drops its `Sent` at once, so that `CLOSE`'s reply is one nobody waits for.
 - **Each clock counts queueing when each request waits for itself.** The write clock starts when
   `request` runs and the reply clock when its bytes are out, so with others queued ahead, both include
   theirs. Calculated at chunk 261,120, not measured: at depth 64 through concurrent `Session::write`, an

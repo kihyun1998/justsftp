@@ -84,7 +84,7 @@ impl std::ops::BitOr for OpenFlags {
 }
 
 /// An opaque token the server gave to address an open file or directory, kept as the bytes it
-/// sent.
+/// sent. It is a plain value: nothing closes it when dropped.
 // Bytes for the same reason as a path: docs/map/invariant/paths-are-bytes.md.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Handle(pub Vec<u8>);

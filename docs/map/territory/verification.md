@@ -88,8 +88,10 @@ drive a real `Session` against a fake server over an in-memory pipe, and the CI 
   number and check `write()` against it, so they pin agreement between the two; a ceiling one byte
   low leaves both green (measured). The third checks the number against the encoder's arithmetic and
   pins the value; mutating the ceiling by one in either direction reddens it and nothing else.
-- **A test that forgets `close` fails**, because `ReadFile`/`WriteFile` assert on drop — which caught
-  `the_ceiling_leaves_room_for_this_file_s_handle` forgetting.
+- **`tests/dropping.rs` counts `CLOSE`s, in both directions**, for each type dropped, each watched future
+  dropped, and `close` dropped before and after it sends: none is the leak, two is the new way to be wrong.
+  They were checked against a real server from outside this repository: dropping open files past its
+  handle limit, on the code before and after ([file transfer](file-transfer.md)).
 - **The fake servers answer in order, one frame at a time, except where order is the subject.**
   `walk.rs`, `download.rs` and `upload.rs` loop on read-then-reply. Only
   `two_requests_in_flight_are_answered_out_of_order_and_each_caller_gets_its_own_reply` and
@@ -108,7 +110,7 @@ drive a real `Session` against a fake server over an in-memory pipe, and the CI 
 
 ## Code
 
-- `tests/pipelined.rs`, `tests/round_trip.rs`, `tests/concurrency.rs`, `tests/walk.rs`, `tests/download.rs`,
+- `tests/pipelined.rs`, `tests/dropping.rs`, `tests/round_trip.rs`, `tests/concurrency.rs`, `tests/walk.rs`, `tests/download.rs`,
   `tests/upload.rs`, `tests/limits.rs`
 - the `#[cfg(test)] mod tests` in each `src/*.rs`
 - `.github/workflows/test.yml`

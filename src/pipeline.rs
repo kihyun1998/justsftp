@@ -4,7 +4,7 @@
 use std::collections::VecDeque;
 use std::num::{NonZeroU32, NonZeroUsize};
 
-use crate::client::{status_ok, unexpected, Download, Walk};
+use crate::client::{status_ok, unexpected, Download, OpenHandle, Walk};
 use crate::error::{Error, Result, StatusCode};
 use crate::protocol::{Handle, OpenFlags, Request, Response};
 use crate::session::{Sent, Session};
@@ -36,15 +36,14 @@ struct PendingRead {
 /// wait growing with depth, but what the SSH channel window already has on its way still goes
 /// first, so on a very slow link it helps less than a low depth does.
 ///
-/// ⚠️ **[`Self::close`] must be called**, for the same reason as on [`crate::ReadFile`].
+/// **Call [`Self::close`] to learn how the close went.** Dropped without it, the handle is still
+/// closed, behind what is already queued, and a failure of that close goes unseen.
 pub struct ReadAhead<'a> {
-    session: &'a Session,
-    handle: Handle,
+    open: OpenHandle<'a>,
     chunk_len: NonZeroU32,
     depth: usize,
     offset: u64,
     queue: VecDeque<PendingRead>,
-    closed: bool,
 }
 
 impl ReadAhead<'_> {
@@ -60,7 +59,7 @@ impl ReadAhead<'_> {
         let Some(front) = self.queue.front_mut() else {
             return Err(Error::Eof);
         };
-        let answer = self.session.reply_to(&mut front.sent).await;
+        let answer = self.open.session().reply_to(&mut front.sent).await;
         let Some(front) = self.queue.pop_front() else {
             return Err(Error::Eof);
         };
@@ -99,20 +98,18 @@ impl ReadAhead<'_> {
         self.offset
     }
 
-    /// Hands the handle back to the server. **Must be called, and must run to its end**: dropping
-    /// this future before the replies still due have landed sends no `CLOSE`. Sends no further
-    /// `READ`, and waits for those replies, each on its own clock from the front of the queue,
-    /// discarding them.
+    /// Hands the handle back to the server and reports how that went. Sends no further `READ`, and
+    /// first waits for the replies still due, each on its own clock from the front of the queue,
+    /// discarding them. Dropping this future does not wait: `CLOSE` goes out at once.
     pub async fn close(mut self) -> Result<()> {
         while let Some(front) = self.queue.front_mut() {
-            if self.session.reply_to(&mut front.sent).await.is_err() {
+            if self.open.session().reply_to(&mut front.sent).await.is_err() {
                 self.queue.clear();
                 break;
             }
             self.queue.pop_front();
         }
-        self.closed = true;
-        self.session.close_handle(&self.handle).await
+        self.open.close().await
     }
 
     /// Sends requests until `depth` are outstanding. A send that fails with others still outstanding
@@ -145,21 +142,12 @@ impl ReadAhead<'_> {
     }
 
     fn send(&self, offset: u64, len: u32) -> Result<PendingRead> {
-        let sent = self.session.enqueue(Request::Read {
-            handle: self.handle.clone(),
+        let sent = self.open.session().enqueue(Request::Read {
+            handle: self.open.handle().clone(),
             offset,
             len,
         })?;
         Ok(PendingRead { offset, len, sent })
-    }
-}
-
-impl Drop for ReadAhead<'_> {
-    fn drop(&mut self) {
-        debug_assert!(
-            self.closed || std::thread::panicking(),
-            "a ReadAhead was dropped without close() — the server handle is leaked. `close_handle` is async and Drop cannot await."
-        );
     }
 }
 
@@ -185,19 +173,19 @@ impl Session {
     ) -> Result<ReadAhead<'_>> {
         let handle = self.open_file(path, OpenFlags::READ).await?;
         Ok(ReadAhead {
-            session: self,
-            handle,
+            open: OpenHandle::new(self, handle),
             chunk_len,
             depth: depth.get(),
             offset,
             queue: VecDeque::new(),
-            closed: false,
         })
     }
 
     /// [`Self::read_file_watched`] with up to `depth` requests outstanding. `on_chunk` is told in file
     /// order. Answering [`Walk::Stop`] sends no further request and closes the handle; the bytes
     /// already on their way are waited for and discarded, so a stop can take up to `depth` replies.
+    /// Dropping this future also closes the handle, once it is open, and reports nothing; dropped while
+    /// the open is due, the server keeps a handle nothing can close.
     pub async fn read_file_ahead_watched(
         &self,
         path: &[u8],
@@ -255,16 +243,26 @@ struct PendingWrite {
 /// them**: one write can fail while the next is accepted. Resume from that offset, not from the
 /// file's size.
 ///
-/// ⚠️ **[`Self::close`] must be called**, for the same reason as on [`crate::WriteFile`].
+/// **Call [`Self::close`] to learn the outcome.** Dropped without it, the writes already queued still
+/// go, then the handle is closed, and nothing says how any of that went.
 pub struct WriteBehind<'a> {
-    session: &'a Session,
-    handle: Handle,
+    open: OpenHandle<'a>,
     depth: usize,
     offset: u64,
     acknowledged: u64,
     queue: VecDeque<PendingWrite>,
     failed: Option<Error>,
-    closed: bool,
+}
+
+/// How a [`WriteBehind`] ended: where it got to, whichever way it went.
+#[derive(Debug)]
+#[must_use = "`result` says whether the writes landed, and `acknowledged` where to resume if not"]
+pub struct Closed {
+    /// The offset up to which **every** byte is acknowledged by the server, with no hole before it.
+    /// This is where to resume after a failure, not the file's size.
+    pub acknowledged: u64,
+    /// The first failure among the queued writes and the close, if any.
+    pub result: Result<()>,
 }
 
 impl WriteBehind<'_> {
@@ -278,10 +276,9 @@ impl WriteBehind<'_> {
         while self.queue.len() >= self.depth {
             self.settle_oldest().await?;
         }
-        let req = self
-            .session
-            .write_request(&self.handle, self.offset, data)?;
-        let sent = self.session.enqueue(req)?;
+        let session = self.open.session();
+        let req = session.write_request(self.open.handle(), self.offset, data)?;
+        let sent = session.enqueue(req)?;
         self.queue.push_back(PendingWrite {
             len: data.len() as u64,
             sent,
@@ -312,19 +309,21 @@ impl WriteBehind<'_> {
 
     /// The largest `data` [`Self::write`] will accept; see [`crate::WriteFile::max_chunk`].
     pub fn max_chunk(&self) -> usize {
-        self.session.max_write_len(&self.handle)
+        self.open.session().max_write_len(self.open.handle())
     }
 
-    /// Waits for every queued write and hands the handle back, whichever way that went. **Must be
-    /// called, and must run to its end**: dropping this future before the writes settle sends no
-    /// `CLOSE`. To learn the resume point of a failure, call [`Self::flush`] first: this consumes the
-    /// value.
-    pub async fn close(mut self) -> Result<()> {
+    /// Waits for every queued write and hands the handle back, whichever way that went, and reports
+    /// both with the resume point. Dropping this future does not wait: `CLOSE` goes out at once, and
+    /// the resume point goes with it. To bound the wait and keep it, bound [`Self::flush`], read
+    /// [`Self::acknowledged`], and drop the value: this would wait for the same writes again.
+    pub async fn close(mut self) -> Closed {
         let flushed = self.flush().await;
-        self.closed = true;
-        let closed = self.session.close_handle(&self.handle).await;
-        flushed?;
-        closed
+        let acknowledged = self.acknowledged;
+        let closed = self.open.close().await;
+        Closed {
+            acknowledged,
+            result: flushed.and(closed),
+        }
     }
 
     fn check(&self) -> Result<()> {
@@ -350,7 +349,7 @@ impl WriteBehind<'_> {
         let Some(front) = self.queue.front_mut() else {
             return Ok(());
         };
-        let answer = self.session.reply_to(&mut front.sent).await;
+        let answer = self.open.session().reply_to(&mut front.sent).await;
         self.settle(answer)
     }
 
@@ -370,15 +369,6 @@ impl WriteBehind<'_> {
                 Err(e)
             }
         }
-    }
-}
-
-impl Drop for WriteBehind<'_> {
-    fn drop(&mut self) {
-        debug_assert!(
-            self.closed || std::thread::panicking(),
-            "a WriteBehind was dropped without close() — the server handle is leaked. `close_handle` is async and Drop cannot await."
-        );
     }
 }
 
@@ -412,14 +402,12 @@ impl Session {
 
     fn write_behind(&self, handle: Handle, offset: u64, depth: NonZeroUsize) -> WriteBehind<'_> {
         WriteBehind {
-            session: self,
-            handle,
+            open: OpenHandle::new(self, handle),
             depth: depth.get(),
             offset,
             acknowledged: offset,
             queue: VecDeque::new(),
             failed: None,
-            closed: false,
         }
     }
 }
