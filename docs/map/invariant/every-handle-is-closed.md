@@ -52,4 +52,6 @@ than by dropping it: PenTerm's walk says so (`sftp-transfer`, PenTerm `2aec7cd40
 ## Where it will recur
 
 Any new loop that holds a server handle, and any change that keeps requests outstanding when a loop
-ends: the close then has replies still to drain ([#1](https://github.com/kihyun1998/justsftp/issues/1)).
+ends. A read's late reply needs no draining, because a reply nobody waits for is dropped; a write's
+must be taken before the close, since that is how a failure is learned
+([#1](https://github.com/kihyun1998/justsftp/issues/1)).

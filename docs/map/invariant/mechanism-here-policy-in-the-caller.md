@@ -22,8 +22,10 @@ leaving it the choice.
   stays here and the *decision* is injected: `Walk` for a walk and a download, `Feed` for an upload.
 - **Refusing and chunking are different halves.** Refusing to emit an oversized packet belongs here,
   because a codec that silently emits something a strict server will reject is wrong at any policy.
-  Chunking a large transfer into packets that fit does not: how to split, how many to keep in flight,
-  and whether to re-issue a short read are transfer *policy*.
+  Chunking a large transfer into packets that fit does not: how to split and how many to keep in flight
+  are transfer *policy*. Continuing after a short read is not: it is offset arithmetic, `ReadFile::next`
+  already does it, and pipelining makes it inseparable from reassembly and failure position, which the
+  crate owns (maintainer, 2026-11-06, [file transfer](../territory/file-transfer.md)).
 - **A limit invented here would be a policy for a case nobody has measured.** A zero-length `DATA`
   reply and a caller answering `Feed::Bytes` with an empty vector forever are both left unguarded
   for that reason ([file transfer](../territory/file-transfer.md)).

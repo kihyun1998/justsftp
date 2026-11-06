@@ -128,6 +128,13 @@ drive a real `Session` against a fake server over an in-memory pipe, and the CI 
 
 ## Known holes / open
 
-- **No test runs against a real server.** Every server here is a fixture.
+- **No test runs against a real server.** Every server here is a fixture. The one run against OpenSSH
+  was a throwaway harness outside this repository, and it measured throughput only: it ends on `fstat`
+  size, does not reassemble and panics on failure, so it is not a pattern for a caller
+  ([#1's result](https://github.com/kihyun1998/justsftp/issues/1#issuecomment-6677251816)).
+- **Nothing here can test a pipelined client yet.** `tests/upload.rs` assembles in arrival order and
+  `tests/download.rs` scripts by arrival. Held-back replies, a short reply among outstanding ones and a
+  failure at k can be built on `tokio::io::duplex`, as
+  `two_requests_in_flight_are_answered_out_of_order_and_each_caller_gets_its_own_reply` is.
 - **Examples marked `ignore` are not compiled**: the two `russh` examples in the
   README and the crate docs would not notice a change in `russh`.

@@ -102,5 +102,11 @@ How big a packet may be in each direction, and how much data fits in one `SSH_FX
   ends the session as `TooLong` rather than refusing the read. `Config` does not check the two against
   each other, and `read_file_watched` does not check `chunk_len` either. Found by reading; the defaults
   are safe (4 MiB inbound, 262,144 outbound).
-- **Depth has no number.** How many bytes may be outstanding is set by the SSH channel window under
-  the crate, which it cannot see. Tracked: [#1](https://github.com/kihyun1998/justsftp/issues/1).
+- **Depth has no number here, and the SSH channel window under the crate sets what is useful.** It
+  cannot see the window. Measured with russh 0.63.1's default 2,097,152 and chunk 261,120 at RTT 30 ms,
+  download stops rising at depth 4 to 8 and upload at 8 to 16; a client window of 16 MiB at depth 64
+  takes download from 33.4 to 101.7 MB/s
+  ([#1's result](https://github.com/kihyun1998/justsftp/issues/1#issuecomment-6677251816)). russh tops
+  up below half a window (R54), which matches about `window / (2 × RTT)` on download; upload is bounded
+  by the server's window. Whether to document a formula resting on one client and one server is open.
+  Tracked: [#1](https://github.com/kihyun1998/justsftp/issues/1).

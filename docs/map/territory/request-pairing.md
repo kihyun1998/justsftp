@@ -101,8 +101,17 @@ recoverable by a later change.
   returns the reply receiver without awaiting anything, so a caller can keep N requests outstanding
   — `russh-sftp`'s `send`, exposed as `write_nowait` and consumed by its `AsyncWrite for File` (E5). Fused
   into one `async fn`, a `poll_write` built on top could not return until the server answered, which
-  is zero pipelining. It stays private until a pipelining policy is measured; the split keeps the
-  seam cheap to expose.
+  is zero pipelining. That holds for a `poll_write`: concurrent `Session::request` calls already keep
+  several outstanding, measured through `Session::read` and `Session::write` in
+  [#1's result](https://github.com/kihyun1998/justsftp/issues/1#issuecomment-6677251816). What `enqueue`
+  adds is a send order the caller controls, since a request sends on its first poll. It stays private;
+  the new transfer types are its intended caller (maintainer's decision,
+  [file transfer](file-transfer.md)).
+- **Each clock counts queueing when each request waits for itself.** The write clock starts when
+  `request` runs and the reply clock when its bytes are out, so with others queued ahead, both include
+  theirs. Calculated at chunk 261,120, not measured: at depth 64 an upload below about 279 KB/s would
+  report `WriteTimeout` and a download below about 557 KB/s `Timeout`. Waiting on the front request only
+  makes each budget the time since the last reply.
 
 ## Code
 
@@ -133,8 +142,13 @@ recoverable by a later change.
 
 ## Known holes / open
 
-- **Pipelining is not built.** No measurement has picked a policy, and `enqueue` stays private until
-  one does. Tracked: [#1](https://github.com/kihyun1998/justsftp/issues/1).
+- **Pipelining is not built.** Its shape is decided ([file transfer](file-transfer.md)), and a
+  session-wide cap on outstanding requests is open, since PenTerm runs a walk and a transfer on one
+  session and their replies then wait behind each other. Tracked:
+  [#1](https://github.com/kihyun1998/justsftp/issues/1).
 - **The outbound queue has no bound.** `outbound` is an `mpsc::unbounded_channel` of whole encoded
   packets. With one request per caller its depth is the caller's concurrency; nothing limits it if a
   caller keeps more outstanding.
+- **`in_flight` counts registered waiters, not requests the server still owes.** Dropping a slot takes
+  it to zero while replies are still due, so "zero when idle" stops meaning idle once requests are held
+  and abandoned.

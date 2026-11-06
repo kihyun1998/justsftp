@@ -10,6 +10,8 @@ Versions read:
 - **openssh-sftp-protocol 0.24.2** and **ssh_format 0.14.2** — what `openssh-sftp-client` 0.15.8
   resolves to.
 - **OpenSSH portable** `master` at `ccc26c76cd47` — `PROTOCOL`, `sftp-server.c`, `sftp-client.c`.
+- **OpenSSH portable** at `102bee7f3a87` — the transfer loops, rows R46 to R52.
+- **russh 0.63.1** — what PenTerm depends on, and what the throughput was measured over.
 - **draft-ietf-secsh-filexfer-02** (SFTP v3) and **RFC 4251**.
 
 To re-check a row, fetch the crate with
@@ -56,6 +58,7 @@ To re-check a row, fetch the crate with
 | R34 | `src/client/rawsession.rs:212-216` | `request()` enqueues, then starts the reply timeout — the clock includes the write. |
 | R29 | `src/client/rawsession.rs:239-246` | `init()` goes through the same timed `request` path. |
 | E5 | `src/client/rawsession.rs:380` | `write_nowait` returns the reply receiver; `File`'s write path calls it. |
+| R53 | `src/client/fs/file.rs:181-182`, `:277-281` | `poll_read` awaits one `read` at a time; `poll_write` waits on the oldest ack only at `max_concurrent_writes`. |
 
 ### Issues and commits
 
@@ -106,6 +109,24 @@ Counted over every upstream issue and commit in 2026-08 (PenTerm). Two are real-
 | R43 | `sftp-client.c`, after `sftp_get_limits` | the download and upload lengths floor at 64. |
 | R44 | `sftp-server.c` `handle_to_string` | a handle is 4 bytes. |
 | R45 | `sftp-server.c` `flags_from_portable` | each `SSH2_FXF_*` flag maps to its own `open(2)` flag; `TRUNC` becomes `O_TRUNC` with or without `CREAT`. |
+
+At `102bee7f3a87`:
+
+| id | where | what it shows |
+|---|---|---|
+| R46 | `sftp-client.c:60`, `:63` | `DEFAULT_COPY_BUFLEN` 32,768, `DEFAULT_NUM_REQUESTS` 64. |
+| R47 | `sftp-client.c:1700`, `:1828-1829` | a download starts at one outstanding request and adds one per `DATA` reply up to the limit. |
+| R48 | `sftp-client.c:1767-1773` | `DATA` longer than asked is fatal, and so is a second zero-length `DATA`. |
+| R49 | `sftp-client.c:1800-1818` | a short reply re-requests its remainder under a new id and shrinks later request lengths. |
+| R50 | `sftp-client.c:1790-1795`, `:2219-2226` | the highest acknowledged offset and the highest contiguous one are tracked apart, with a flag for reordering. |
+| R51 | `sftp-client.c:2185-2186`, `:2202-2203` | an upload waits at the first request and at `num_requests` outstanding; a failure is remembered, sending stops, and the remaining acks are taken. |
+| R52 | `channels.h:224-225` | `CHAN_SES_PACKET_DEFAULT` 32 KiB and `CHAN_SES_WINDOW_DEFAULT` 64 of them. |
+
+## russh
+
+| id | path:lines @0.63.1 | what it shows |
+|---|---|---|
+| R54 | `src/session.rs:321`, `src/client/mod.rs:2278` | a window adjust is sent once under half the target is left; `window_size` defaults to 2,097,152. |
 
 ## Specifications
 

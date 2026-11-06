@@ -77,6 +77,17 @@ by the caller, `write_file_watched` owning the loop and asking the caller for ea
   holds them across its own loop, and its drag-out reader calls `open_file` and `Session::read`
   directly (`explorer_transfer/engine.rs`, `explorer_drag_out/remote.rs`, PenTerm `2aec7cd40`,
   2026-11-06), so their signatures carry a caller who is not in this repository.
+- **A transfer's rate is bound by the round trip, and depth lifts it until the channel window stops
+  it.** Measured once, in MB/s, on the path and conditions in
+  [#1's result](https://github.com/kihyun1998/justsftp/issues/1#issuecomment-6677251816): at RTT 30 ms
+  one request at a time moves 7.7 down and 7.6 up, OpenSSH's `sftp` 37.0 and 38.3, and concurrent
+  `Session::read` and `Session::write` reach 33.4 and 58.4. No short read occurred, so that path was
+  not exercised. See [transfer lengths](transfer-lengths.md) for what sets the ceiling.
+- **Pipelining goes in new public types beside `ReadFile` and `WriteFile`** (maintainer, 2026-11-06).
+  The crate owns offsets, reassembly and failure position; the caller passes the depth. Decided against
+  a depth on the existing types, where `write` would mean "done" or "queued" by how the file was opened
+  and `next(len)` does not fit read-ahead, and against leaving it to callers, each of whom would then
+  own reassembly and a contiguous acknowledged offset. Not built; what is still open is below.
 
 ## Code
 
@@ -89,10 +100,11 @@ by the caller, `write_file_watched` owning the loop and asking the caller for ea
 
 ## Reference behaviour
 
-- OpenSSH's `sftp-client.c` download loop was read for
-  [#1](https://github.com/kihyun1998/justsftp/issues/1), at the commit that issue names. Its upload
-  loop was not, and no other client's transfer loop was. Nothing in this crate's loops was derived from
-  either.
+- OpenSSH's `sftp_download` and `sftp_upload` keep many requests outstanding, track a contiguous offset
+  apart from the highest one, re-request the rest of a short reply and end on a reply longer than asked
+  (R46 to R51). `russh-sftp` pipelines writes only (R53). Each was read for
+  [#1](https://github.com/kihyun1998/justsftp/issues/1). Nothing in this crate's loops today was derived
+  from either.
 
 ## Cross-cutting invariants
 
@@ -120,13 +132,17 @@ by the caller, `write_file_watched` owning the loop and asking the caller for ea
 
 ## Known holes / open
 
-- **Pipelining.** A large transfer moves one chunk per round trip, and the design questions it raises
-  for `ReadFile` and `WriteFile` — short reads with later offsets outstanding, reply order, draining
-  after `EOF` or a failure, what `written` means, what a stop promises — are not decided. Tracked:
-  [#1](https://github.com/kihyun1998/justsftp/issues/1).
+- **Pipelining's new types are not built, and these are open.** Their names; how a failed upload
+  reports its contiguous acknowledged offset; whether the watched loops get a depth path; a server
+  short on every request; `EOF` with later offsets outstanding; what a stop promises when replies are
+  still due. Tracked: [#1](https://github.com/kihyun1998/justsftp/issues/1).
+- **Resuming from a destination's size stops being safe once writes overlap.** A write failing at k
+  with k+1 accepted leaves a hole, and that caller reads it as a correct prefix. PenTerm resumes this way
+  (`resume_verdict` in `explorer_transfer/engine.rs`, PenTerm `2aec7cd40`, 2026-11-06).
 - **Zero-length `DATA` and an endless empty `Feed::Bytes`** are unguarded on purpose, above.
 - **A `DATA` reply longer than was asked for is accepted.** `Session::read` does not compare it with
   `len`, and `ReadFile::next` advances the offset by what arrived. The inbound ceiling is the only
-  bound. Found by reading `Session::read`; no server is known to do this.
+  bound. Found by reading `Session::read`; no server is known to do this. With offsets outstanding it
+  would overlap a later one, and OpenSSH ends the transfer on it (R48).
 - **`overwrite_file` against a server that enforces § 6.3** is unmeasured; such a server may refuse
   `TRUNCATE` without `CREATE`.

@@ -1,6 +1,6 @@
 # Publishes the crate to crates.io when a `vX.Y.Z` tag is pushed, through crates.io Trusted
 # Publishing: no token is stored; the job trades GitHub's OIDC token for a short-lived crates.io
-# token that the auth action revokes when the job ends. Why: docs/map/territory/package-and-release.md.
+# token that the auth action revokes when the job ends. Why: docs/map/territory/release.md.
 name: publish
 
 on:
