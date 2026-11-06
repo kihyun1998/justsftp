@@ -74,6 +74,8 @@ let session = justsftp::Session::open(channel.into_stream(), justsftp::Config::d
 - Listing: `list_dir`, `list_dir_watched`, `read_dir`, `real_path`.
 - Reading and writing: `read_file_watched`, `write_file_watched`, and `ReadFile` / `WriteFile` for a
   caller that drives the loop itself; `write_file_from` and `read_file_from` to resume.
+- Several requests outstanding: `ReadAhead`, `WriteBehind` and `read_file_ahead_watched`, at a depth
+  you choose, with bytes still in file order and the acknowledged offset reported after a failure.
 - Metadata: `stat`, `lstat`, `fstat`, `set_stat`, `remove`, `rename`, `mkdir`, `rmdir`, `read_link`.
 - `limits@openssh.com`: asked at open; the server's stated limits lower read and write lengths.
 - Separate timeouts for writing a request and for the reply, and requests that are safe to cancel.
@@ -82,7 +84,9 @@ let session = justsftp::Session::open(channel.into_stream(), justsftp::Config::d
 
 - **It is not an SSH client.** It runs over any `AsyncRead + AsyncWrite + Unpin + Send + 'static`.
 - **It does not decode names.** How to show a byte filename is your decision.
-- **It is not pipelined.** Each call has one request in flight; many calls can run at once.
+- **It does not pipeline unless asked.** Each call has one request in flight, and only `ReadAhead` and
+  `WriteBehind` keep more. It does not choose a depth: what helps depends on the SSH channel window,
+  which it cannot see.
 - **No `SSH_FXP_SYMLINK`.** Servers disagree on its argument order.
 - **v3 only.** A server offering another version is refused at the handshake.
 - **A server's status message is passed on as sent**, control characters included. Treat it as

@@ -69,7 +69,9 @@ How big a packet may be in each direction, and how much data fits in one `SSH_FX
 - `src/session.rs` — `Config` (`max_inbound_packet`, `max_outbound_packet`), `READ_OVERHEAD`,
   `WRITE_OVERHEAD`, `SMALLEST_TRANSFER_LEN`, `stated`, `Session::max_read_len`,
   `Session::server_read_len`, `Session::server_write_len`, `Session::config`
-- `src/client.rs` — `WriteFile::max_chunk`, `Session::write`
+- `src/client.rs` — `WriteFile::max_chunk`, `Session::write`, `Session::max_write_len`,
+  `Session::write_request`
+- `src/pipeline.rs` — `WriteBehind::max_chunk`
 - `tests/limits.rs`
 
 ## Reference behaviour
@@ -108,5 +110,6 @@ How big a packet may be in each direction, and how much data fits in one `SSH_FX
   takes download from 33.4 to 101.7 MB/s
   ([#1's result](https://github.com/kihyun1998/justsftp/issues/1#issuecomment-6677251816)). russh tops
   up below half a window (R54), which matches about `window / (2 × RTT)` on download; upload is bounded
-  by the server's window. Whether to document a formula resting on one client and one server is open.
-  Tracked: [#1](https://github.com/kihyun1998/justsftp/issues/1).
+  by the server's window. The public docs say only that depth past the window moves no more bytes: a
+  formula would rest on one client and one server. The same ceilings hold through `ReadAhead` and
+  `WriteBehind` ([file transfer](file-transfer.md)).

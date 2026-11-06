@@ -105,8 +105,8 @@ pub enum Error {
         had: usize,
     },
     /// A length above a ceiling: an inbound packet over [`Config::max_inbound_packet`], an outbound
-    /// one over [`Config::max_outbound_packet`], or, for a write, data longer than the server's
-    /// limits allow.
+    /// one over [`Config::max_outbound_packet`], for a write, data longer than the server's limits
+    /// allow, or, for a [`crate::ReadAhead`], a reply longer than was asked for.
     ///
     /// [`Config::max_inbound_packet`]: crate::Config::max_inbound_packet
     /// [`Config::max_outbound_packet`]: crate::Config::max_outbound_packet
@@ -148,7 +148,8 @@ pub enum Error {
     /// [`Config::write_timeout`]: crate::Config::write_timeout
     WriteTimeout,
     /// The request was written and no reply arrived within [`Config::request_timeout`], counted
-    /// from when the bytes reached the stream. Also the handshake's, where one budget covers
+    /// from when the bytes reached the stream, or, on a [`crate::ReadAhead`] or [`crate::WriteBehind`],
+    /// from when the wait for this reply began. Also the handshake's, where one budget covers
     /// writing `SSH_FXP_INIT` and the reply.
     ///
     /// [`Config::request_timeout`]: crate::Config::request_timeout
@@ -194,6 +195,41 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+impl Error {
+    /// The same failure again, for a value that keeps reporting it. An [`Error::Io`] keeps its kind
+    /// and text.
+    pub(crate) fn repeated(&self) -> Self {
+        match self {
+            Self::Truncated { needed, had } => Self::Truncated {
+                needed: *needed,
+                had: *had,
+            },
+            Self::TooLong { len, limit } => Self::TooLong {
+                len: *len,
+                limit: *limit,
+            },
+            Self::UnknownPacketType(t) => Self::UnknownPacketType(*t),
+            Self::UnexpectedReply { expected, got } => Self::UnexpectedReply {
+                expected,
+                got: *got,
+            },
+            Self::RequestIdInUse(id) => Self::RequestIdInUse(*id),
+            Self::Status(s) => Self::Status(s.clone()),
+            Self::UnsupportedVersion { theirs, ours } => Self::UnsupportedVersion {
+                theirs: *theirs,
+                ours: *ours,
+            },
+            Self::SessionEnded { cause } => Self::SessionEnded {
+                cause: std::sync::Arc::clone(cause),
+            },
+            Self::WriteTimeout => Self::WriteTimeout,
+            Self::Timeout => Self::Timeout,
+            Self::Eof => Self::Eof,
+            Self::Io(e) => Self::Io(std::io::Error::new(e.kind(), e.to_string())),
+        }
+    }
+}
+
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
         Self::Io(e)
@@ -203,6 +239,28 @@ impl From<std::io::Error> for Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_repeated_failure_is_the_same_failure() {
+        // Mutation: answer `Self::Eof` for the `Io` arm, or replace the cause in `SessionEnded`.
+        let io = Error::Io(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "gone")).repeated();
+        match io {
+            Error::Io(e) => {
+                assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe);
+                assert_eq!(e.to_string(), "gone");
+            }
+            other => panic!("expected Io, got {other:?}"),
+        }
+
+        let cause = std::sync::Arc::new(Error::Timeout);
+        let ended = Error::SessionEnded {
+            cause: std::sync::Arc::clone(&cause),
+        }
+        .repeated();
+        assert!(
+            matches!(ended, Error::SessionEnded { cause: c } if std::sync::Arc::ptr_eq(&c, &cause))
+        );
+    }
 
     #[test]
     fn an_unrecognised_status_code_is_carried_rather_than_failing_the_packet() {

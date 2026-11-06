@@ -91,7 +91,10 @@ recoverable by a later change.
   ceiling — indistinguishable from a server hanging up. A later one sent the cause to one waiter and
   `Eof` to the rest, and `HashMap::drain` has no order, so *which* caller learned the truth was
   nondeterministic between runs. `reader_done` is published before the drain, so a racing request
-  either sees the flag and fails fast or is already in the map and gets the cause.
+  either sees the flag and fails fast or is already in the map and gets the cause. `enqueue` reads the
+  flag under the lock the reader drains under, which is what makes that "either": read outside it, a
+  request could register just after the drain, wait out the budget and report `Timeout`. Found by
+  reading; no test provokes that window.
 - **Cancelling a request stops the wait, not the request.** Once `enqueue` returns, the packet goes
   out whole whatever the caller does; `a_cancelled_request_does_not_leave_half_a_packet_on_the_wire`
   asserts it. A cancelled `WRITE` or `REMOVE`, and one that reported `Timeout` or `WriteTimeout`, may
@@ -104,18 +107,26 @@ recoverable by a later change.
   is zero pipelining. That holds for a `poll_write`: concurrent `Session::request` calls already keep
   several outstanding, measured through `Session::read` and `Session::write` in
   [#1's result](https://github.com/kihyun1998/justsftp/issues/1#issuecomment-6677251816). What `enqueue`
-  adds is a send order the caller controls, since a request sends on its first poll. It stays private;
-  the new transfer types are its intended caller (maintainer's decision,
-  [file transfer](file-transfer.md)).
+  adds is a send order the caller controls, since a request sends on its first poll. It stays private
+  to the crate; `ReadAhead` and `WriteBehind` hold what it returns, a `Sent`, and wait through
+  `reply_to`, which `request` also uses (maintainer's decision, [file transfer](file-transfer.md)).
 - **Each clock counts queueing when each request waits for itself.** The write clock starts when
   `request` runs and the reply clock when its bytes are out, so with others queued ahead, both include
-  theirs. Calculated at chunk 261,120, not measured: at depth 64 an upload below about 279 KB/s would
-  report `WriteTimeout` and a download below about 557 KB/s `Timeout`. Waiting on the front request only
-  makes each budget the time since the last reply.
+  theirs. Calculated at chunk 261,120, not measured: at depth 64 through concurrent `Session::write`, an
+  upload below about 279 KB/s would report `WriteTimeout`, and a download through `Session::read` below
+  about 557 KB/s `Timeout`. `ReadAhead` and `WriteBehind` call `reply_to` on the front only, so each
+  budget there is the time since the last reply; `the_reply_clock_runs_from_the_front_of_the_queue` and
+  `the_write_clock_runs_from_the_front_of_the_queue` hold it. That protects their own replies only.
+- **`reply_to` can be dropped and called again.** It takes `written` out only once that is finished, so
+  a retry never polls a finished receiver; that is what makes `ReadAhead::next` and
+  `WriteBehind::flush` cancel-safe. A retry starts its clock again, so a caller cancelling on a shorter
+  tick never sees `Timeout`, as with `ReadFile::next`. `Sent::try_reply` reads the same state without
+  waiting.
 
 ## Code
 
-- `src/session.rs` — `Pending`, `lock`, `Slot`, `Outbound`, `Session::enqueue`, `Session::request`,
+- `src/session.rs` — `Pending`, `lock`, `Slot`, `Outbound`, `Sent` (`try_reply`), `Session::enqueue`,
+  `Session::reply_to`, `Session::request`,
   `Session::in_flight`, `write_loop`, `read_loop`
 
 ## Reference behaviour
@@ -142,13 +153,13 @@ recoverable by a later change.
 
 ## Known holes / open
 
-- **Pipelining is not built.** Its shape is decided ([file transfer](file-transfer.md)), and a
-  session-wide cap on outstanding requests is open, since PenTerm runs a walk and a transfer on one
-  session and their replies then wait behind each other. Tracked:
-  [#1](https://github.com/kihyun1998/justsftp/issues/1).
+- **No session-wide cap on outstanding requests.** Each `ReadAhead` and `WriteBehind` has its own depth,
+  and they add up. Any other request on the session waits behind them on its own clock, so on a slow
+  link it can report `Timeout` while nothing is wrong: at the sizes above, about 557 KB/s at depth 64
+  and 70 KB/s at depth 8, calculated. PenTerm runs a walk and a transfer on one session.
 - **The outbound queue has no bound.** `outbound` is an `mpsc::unbounded_channel` of whole encoded
-  packets. With one request per caller its depth is the caller's concurrency; nothing limits it if a
-  caller keeps more outstanding.
+  packets. Its depth is the sum of every caller's concurrency and every `ReadAhead` and `WriteBehind`
+  depth, and nothing limits that sum.
 - **`in_flight` counts registered waiters, not requests the server still owes.** Dropping a slot takes
   it to zero while replies are still due, so "zero when idle" stops meaning idle once requests are held
   and abandoned.

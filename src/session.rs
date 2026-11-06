@@ -22,7 +22,7 @@ const READ_OVERHEAD: u32 = 9;
 
 /// Write-packet overhead: length prefix(4) + type(1) + id(4) + handle length prefix(4) +
 /// offset(8) + data length prefix(4), without the handle's own bytes
-/// ([`crate::WriteFile::max_chunk`] adds those).
+/// (`Session::max_write_len` adds those).
 ///
 /// Counting the length prefix here and not in `READ_OVERHEAD` is deliberate
 /// (docs/map/territory/transfer-lengths.md).
@@ -35,10 +35,12 @@ const SMALLEST_TRANSFER_LEN: u64 = 64;
 #[derive(Debug, Clone)]
 pub struct Config {
     /// How long to wait for a reply **after the request's bytes have been written** — server
-    /// latency and the response transfer only. Also bounds the whole handshake, its write
+    /// latency and the response transfer only; on [`crate::ReadAhead`] and [`crate::WriteBehind`], from
+    /// when the request reaches the front of the queue. Also bounds the whole handshake, its write
     /// included. Default 30 s.
     pub request_timeout: Duration,
-    /// How long to wait for a request's bytes to **reach the stream**, a budget of its own. Also
+    /// How long to wait for a request's bytes to **reach the stream**, a budget of its own, counted
+    /// the same way. Also
     /// bounds how long [`Session::close`] waits for the queue to drain. Default 60 s.
     pub write_timeout: Duration,
     /// The largest packet this client will accept from the server, checked before anything is
@@ -90,6 +92,35 @@ impl Drop for Slot {
 struct Outbound {
     bytes: Vec<u8>,
     written: oneshot::Sender<std::result::Result<(), Arc<Error>>>,
+}
+
+/// A request handed to the writer task, and what it still owes: `written` until its bytes reach the
+/// stream, then `reply`. Dropping it reclaims its slot in the pending map.
+pub(crate) struct Sent {
+    _slot: Slot,
+    written: Option<oneshot::Receiver<std::result::Result<(), Arc<Error>>>>,
+    reply: oneshot::Receiver<Result<Response>>,
+}
+
+impl Sent {
+    /// The outcome if it is already known, without waiting.
+    pub(crate) fn try_reply(&mut self) -> Option<Result<Response>> {
+        use oneshot::error::TryRecvError;
+
+        if let Some(written) = self.written.as_mut() {
+            match written.try_recv() {
+                Ok(Ok(())) => self.written = None,
+                Ok(Err(cause)) => return Some(Err(Error::SessionEnded { cause })),
+                Err(TryRecvError::Empty) => return None,
+                Err(TryRecvError::Closed) => return Some(Err(Error::Eof)),
+            }
+        }
+        match self.reply.try_recv() {
+            Ok(response) => Some(response),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Closed) => Some(Err(Error::Eof)),
+        }
+    }
 }
 
 /// A live SFTP conversation over some byte stream — any
@@ -230,8 +261,8 @@ impl Session {
         lock(&self.pending).len()
     }
 
-    /// This session's settings — read by [`crate::WriteFile::max_chunk`], which has to know the
-    /// outbound ceiling but lives in another module.
+    /// This session's settings — read by `Session::max_write_len`, which has to know the outbound
+    /// ceiling but lives in another module.
     pub(crate) fn config(&self) -> &Config {
         &self.config
     }
@@ -258,29 +289,19 @@ impl Session {
     }
 
     /// Registers a waiter and hands the encoded packet to the writer task, **without awaiting the
-    /// write**. Returns the slot guard and the two receivers. Split from [`Self::request`] as the
-    /// seam a pipelining caller would use (docs/map/territory/request-pairing.md).
-    #[allow(clippy::type_complexity)]
-    fn enqueue(
-        &self,
-        req: Request,
-    ) -> Result<(
-        Slot,
-        oneshot::Receiver<std::result::Result<(), Arc<Error>>>,
-        oneshot::Receiver<Result<Response>>,
-    )> {
-        // Liveness first: after a half-close the write half still accepts bytes that no reply
-        // will answer (docs/map/territory/request-pairing.md).
-        if self.reader_done.load(Ordering::Acquire) {
-            return Err(Error::Eof);
-        }
-
+    /// write** (docs/map/territory/request-pairing.md).
+    pub(crate) fn enqueue(&self, req: Request) -> Result<Sent> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (reply_tx, reply_rx) = oneshot::channel();
 
         // ① Register before writing, and refuse an id still outstanding after the counter wraps.
         {
             let mut pending = lock(&self.pending);
+            // Liveness first, under the lock the reader drains under: after a half-close the write half
+            // still accepts bytes that no reply will answer (docs/map/territory/request-pairing.md).
+            if self.reader_done.load(Ordering::Acquire) {
+                return Err(Error::Eof);
+            }
             if pending.contains_key(&id) {
                 return Err(Error::RequestIdInUse(id));
             }
@@ -315,7 +336,38 @@ impl Session {
             return Err(Error::Eof);
         }
 
-        Ok((slot, written_rx, reply_rx))
+        Ok(Sent {
+            _slot: slot,
+            written: Some(written_rx),
+            reply: reply_rx,
+        })
+    }
+
+    /// Waits for what `sent` still owes: first for its bytes to reach the stream
+    /// ([`Config::write_timeout`], else [`Error::WriteTimeout`]), then for its reply
+    /// ([`Config::request_timeout`], else [`Error::Timeout`]). Each clock starts when this call
+    /// starts waiting on it. Dropping this future leaves `sent` able to be waited on again.
+    pub(crate) async fn reply_to(&self, sent: &mut Sent) -> Result<Response> {
+        // ④ Wait for the bytes to reach the stream, on a clock; a failed write is reported.
+        if let Some(written) = sent.written.as_mut() {
+            let outcome = tokio::time::timeout(self.config.write_timeout, written).await;
+            if outcome.is_ok() {
+                sent.written = None;
+            }
+            match outcome {
+                Ok(Ok(Ok(()))) => {}
+                Ok(Ok(Err(cause))) => return Err(Error::SessionEnded { cause }),
+                Ok(Err(_)) => return Err(Error::Eof),
+                Err(_) => return Err(Error::WriteTimeout),
+            }
+        }
+
+        // ⑤ The reply clock starts here, after the bytes are on the stream.
+        match tokio::time::timeout(self.config.request_timeout, &mut sent.reply).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(_)) => Err(Error::Eof),
+            Err(_) => Err(Error::Timeout),
+        }
     }
 
     /// Sends one request and waits for the reply that carries its id: first for the bytes to reach
@@ -323,22 +375,8 @@ impl Session {
     /// ([`Config::request_timeout`], else [`Error::Timeout`]). Cancel-safe.
     pub async fn request(&self, req: Request) -> Result<Response> {
         // The slot guard lives for the whole call.
-        let (_slot, written_rx, reply_rx) = self.enqueue(req)?;
-
-        // ④ Wait for the bytes to reach the stream, on a clock; a failed write is reported.
-        match tokio::time::timeout(self.config.write_timeout, written_rx).await {
-            Ok(Ok(Ok(()))) => {}
-            Ok(Ok(Err(cause))) => return Err(Error::SessionEnded { cause }),
-            Ok(Err(_)) => return Err(Error::Eof),
-            Err(_) => return Err(Error::WriteTimeout),
-        }
-
-        // ⑤ The reply clock starts here, after the bytes are on the stream.
-        match tokio::time::timeout(self.config.request_timeout, reply_rx).await {
-            Ok(Ok(response)) => response,
-            Ok(Err(_)) => Err(Error::Eof),
-            Err(_) => Err(Error::Timeout),
-        }
+        let mut sent = self.enqueue(req)?;
+        self.reply_to(&mut sent).await
     }
 
     /// Ends the session, **sending what is already queued** before stopping the writer, and fails

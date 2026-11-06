@@ -3,7 +3,7 @@
 
 use crate::attrs::{AttrsUpdate, FileAttributes};
 use crate::error::{Error, Result, StatusCode};
-use crate::protocol::{DirEntry, Handle, OpenFlags, Request, Response};
+use crate::protocol::{packet, DirEntry, Handle, OpenFlags, Request, Response};
 use crate::session::Session;
 
 /// Whether a watched walk or read carries on after the batch or chunk it was just told about.
@@ -46,7 +46,7 @@ impl Session {
         if names.is_empty() {
             return Err(Error::UnexpectedReply {
                 expected: "NAME with one entry",
-                got: 104,
+                got: packet::NAME,
             });
         }
         Ok(names.remove(0).filename)
@@ -266,7 +266,7 @@ impl ReadFile<'_> {
 impl Drop for ReadFile<'_> {
     fn drop(&mut self) {
         debug_assert!(
-            self.closed,
+            self.closed || std::thread::panicking(),
             "a ReadFile was dropped without close() — the server handle is leaked. `close_handle` is async and Drop cannot await, so this assertion is the only thing standing between a forgotten close and a server that quietly stops opening files."
         );
     }
@@ -302,16 +302,7 @@ impl WriteFile<'_> {
     /// smaller of what fits the outbound packet with this file's handle and the server's stated
     /// write bound, if any. It depends on the handle's length, so it is per file.
     pub fn max_chunk(&self) -> usize {
-        let handle_len = self.handle.as_bytes().len();
-        let ours = self
-            .session
-            .config()
-            .max_outbound_packet
-            .saturating_sub(crate::session::WRITE_OVERHEAD + handle_len);
-        match self.session.server_write_len(handle_len) {
-            Some(theirs) => ours.min(theirs),
-            None => ours,
-        }
+        self.session.max_write_len(&self.handle)
     }
 
     /// Hands the handle back. **Must be called.**
@@ -324,7 +315,7 @@ impl WriteFile<'_> {
 impl Drop for WriteFile<'_> {
     fn drop(&mut self) {
         debug_assert!(
-            self.closed,
+            self.closed || std::thread::panicking(),
             "a WriteFile was dropped without close() — the server handle is leaked. `close_handle` is async and Drop cannot await, so this assertion is the only thing standing between a forgotten close and a server that quietly stops opening files."
         );
     }
@@ -449,7 +440,32 @@ impl Session {
     /// Writes `data` at `offset`: all of it, or an error. Data longer than the server's stated
     /// write bound is refused with [`Error::TooLong`] before it is sent.
     pub async fn write(&self, handle: &Handle, offset: u64, data: &[u8]) -> Result<()> {
-        // The server's own write bound; the outbound ceiling is checked in `enqueue`.
+        let req = self.write_request(handle, offset, data)?;
+        self.expect_ok(req).await
+    }
+
+    /// The largest `SSH_FXP_WRITE` data for this handle: what fits the outbound packet, lowered to
+    /// the server's stated write bound.
+    pub(crate) fn max_write_len(&self, handle: &Handle) -> usize {
+        let handle_len = handle.as_bytes().len();
+        let ours = self
+            .config()
+            .max_outbound_packet
+            .saturating_sub(crate::session::WRITE_OVERHEAD + handle_len);
+        match self.server_write_len(handle_len) {
+            Some(theirs) => ours.min(theirs),
+            None => ours,
+        }
+    }
+
+    /// A write request, or [`Error::TooLong`] above the server's stated write bound. The outbound
+    /// ceiling is checked in `enqueue`.
+    pub(crate) fn write_request(
+        &self,
+        handle: &Handle,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<Request> {
         if let Some(limit) = self.server_write_len(handle.as_bytes().len()) {
             if data.len() > limit {
                 return Err(Error::TooLong {
@@ -458,12 +474,11 @@ impl Session {
                 });
             }
         }
-        self.expect_ok(Request::Write {
+        Ok(Request::Write {
             handle: handle.clone(),
             offset,
             data: data.to_vec(),
         })
-        .await
     }
 
     /// Releases a file or directory handle. Every handle from [`Self::open_dir`],
@@ -567,18 +582,14 @@ impl Session {
         if names.is_empty() {
             return Err(Error::UnexpectedReply {
                 expected: "NAME with one entry",
-                got: 104,
+                got: packet::NAME,
             });
         }
         Ok(names.remove(0).filename)
     }
 
     async fn expect_ok(&self, req: Request) -> Result<()> {
-        match self.request(req).await {
-            Ok(Response::Status(s)) if !s.code.is_error() => Ok(()),
-            Ok(Response::Status(s)) => Err(Error::Status(s)),
-            other => Err(unexpected("STATUS", other)),
-        }
+        status_ok(self.request(req).await)
     }
 
     async fn expect_handle(&self, req: Request) -> Result<Handle> {
@@ -603,9 +614,18 @@ impl Session {
     }
 }
 
+/// `Ok` for a `STATUS` of `OK`, and the failure otherwise: `EOF` answers a read or a walk, not this.
+pub(crate) fn status_ok(got: Result<Response>) -> Result<()> {
+    match got {
+        Ok(Response::Status(s)) if s.code == StatusCode::Ok => Ok(()),
+        Ok(Response::Status(s)) => Err(Error::Status(s)),
+        other => Err(unexpected("STATUS", other)),
+    }
+}
+
 /// Turns "the reply was not the kind this verb needed" into an error; a `STATUS` becomes
 /// [`Error::Status`] (docs/map/territory/errors.md).
-fn unexpected(expected: &'static str, got: Result<Response>) -> Error {
+pub(crate) fn unexpected(expected: &'static str, got: Result<Response>) -> Error {
     match got {
         Ok(Response::Status(s)) => Error::Status(s),
         Ok(other) => Error::UnexpectedReply {

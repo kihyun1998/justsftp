@@ -57,7 +57,7 @@ is learned.
 
 ## Blast radius
 
-- [File transfer](file-transfer.md) — the two loops keep one promise: told after each landing, a stop
+- [File transfer](file-transfer.md) — the loops keep one promise: told after each landing, a stop
   sends no further request, and a stop is reported. A change to it here leaves the download and upload
   promising the old one.
 - [Path verbs](path-verbs.md) — a walk ends by `close_handle` even when the walk failed; a change to

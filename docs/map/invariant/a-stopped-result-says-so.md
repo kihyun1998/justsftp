@@ -8,8 +8,7 @@ enum, never a `bool` or an `Option`.
 
 ## Why it is cross-cutting
 
-The three loops build their results separately and share no type. A caller treats the three the same
-way, so one that stopped reporting would read as complete while the others did not.
+The loops build their results separately and share no loop. A caller treats them the same way, so one that stopped reporting would read as complete while the others did not.
 
 - **Without the flag a caller cannot tell "this folder holds twenty things" from "I stopped after
   twenty"**, and drawing the second as the first is a listing that lies about the server.
@@ -24,6 +23,8 @@ way, so one that stopped reporting would read as complete while the others did n
 
 - [Listing](../territory/listing.md) — `Walk`, `Listing`.
 - [File transfer](../territory/file-transfer.md) — `Download`, `Feed`, `Upload`.
+  `read_file_ahead_watched` reports through `Download` too. A stop there sends no further request and
+  waits for what was already sent, discarding it, so a slow link does not turn it into `Timeout`.
 
 ## What a violation looks like
 

@@ -60,6 +60,39 @@
 //! # }
 //! ```
 //!
+//! # Keeping several requests outstanding
+//!
+//! One request at a time moves one chunk per round trip. [`ReadAhead`] and [`WriteBehind`] keep up
+//! to a depth of your choosing outstanding, and still hand bytes over in file order.
+//!
+//! ```no_run
+//! # async fn demo(session: justsftp::Session) -> Result<(), justsftp::Error> {
+//! use std::num::{NonZeroU32, NonZeroUsize};
+//!
+//! let depth = NonZeroUsize::new(8).unwrap();
+//! let chunk_len = NonZeroU32::new(session.max_read_len()).unwrap();
+//!
+//! // The crate owns the loop, so the handle is closed whichever way it ends.
+//! let download = session
+//!     .read_file_ahead_watched(b"/srv/report.pdf", chunk_len, depth, &mut |chunk, _| {
+//!         println!("{} bytes, in file order", chunk.len());
+//!         justsftp::Walk::Continue
+//!     })
+//!     .await?;
+//! println!("{} bytes read", download.bytes);
+//!
+//! let mut out = session.write_file_behind(b"/srv/copy.pdf", depth).await?;
+//! let mut sent = out.write(b"queued, not yet acknowledged").await;
+//! if sent.is_ok() {
+//!     sent = out.flush().await;
+//! }
+//! if sent.is_err() {
+//!     println!("resume from {}, not from the file's size", out.acknowledged());
+//! }
+//! out.close().await
+//! # }
+//! ```
+//!
 //! # Over russh
 //!
 //! The crate names no SSH library. With `russh`, open a session channel, request the `sftp`
@@ -89,7 +122,9 @@
 //!
 //! - **Not an SSH client.** It runs over any `AsyncRead + AsyncWrite + Unpin + Send + 'static`.
 //! - **Not a decoder.** Turning a filename's bytes into something to show is the caller's.
-//! - **Not pipelined.** One request is in flight per call; many calls can run at once.
+//! - **Not pipelined unless asked.** One request is in flight per call, and only [`ReadAhead`] and
+//!   [`WriteBehind`] keep more. Nothing here chooses a depth, and nothing limits the requests of a
+//!   whole session.
 //! - **Not the whole protocol.** Listing, transfer and basic metadata; no `SSH_FXP_SYMLINK`.
 //! - **v3 only.** A server offering another version is refused at the handshake.
 //!
@@ -105,6 +140,7 @@
 mod attrs;
 mod client;
 mod error;
+mod pipeline;
 mod protocol;
 mod session;
 mod wire;
@@ -112,6 +148,7 @@ mod wire;
 pub use attrs::{AttrsUpdate, Extension, FileAttributes, FileType};
 pub use client::{Download, Feed, Listing, ReadFile, Upload, Walk, WriteFile};
 pub use error::{Error, Result, Status, StatusCode};
+pub use pipeline::{ReadAhead, WriteBehind};
 pub use protocol::{
     DirEntry, Handle, OpenFlags, Request, Response, ServerLimits, ServerVersion, VERSION,
 };

@@ -91,9 +91,14 @@ drive a real `Session` against a fake server over an in-memory pipe, and the CI 
 - **A test that forgets `close` fails**, because `ReadFile`/`WriteFile` assert on drop — which caught
   `the_ceiling_leaves_room_for_this_file_s_handle` forgetting.
 - **The fake servers answer in order, one frame at a time, except where order is the subject.**
-  `walk.rs`, `download.rs` and `upload.rs` loop on read-then-reply; only
-  `two_requests_in_flight_are_answered_out_of_order_and_each_caller_gets_its_own_reply` holds replies
-  back and reverses them.
+  `walk.rs`, `download.rs` and `upload.rs` loop on read-then-reply. Only
+  `two_requests_in_flight_are_answered_out_of_order_and_each_caller_gets_its_own_reply` and
+  `tests/pipelined.rs` hold replies back and reorder them.
+- **`tests/pipelined.rs` is scripted line by line**, in `tokio::join!` with the client, on paused time:
+  the test decides when each reply lands, and `Far::silent` shows nothing more was sent without a real
+  wait. A script that waits forever for a frame fails by hanging, the convention `concurrency.rs` has.
+  Each test was seen red under a mutation of the code it holds; the list is in the commit that added
+  the file, not in comments.
 - **Each test file has its own `read_frame` and reply builders.** There is no shared test module, so a
   framing change is made once per file; for `round_trip.rs` the separation is the point, above.
 - **CI** runs `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings`,
@@ -103,7 +108,7 @@ drive a real `Session` against a fake server over an in-memory pipe, and the CI 
 
 ## Code
 
-- `tests/round_trip.rs`, `tests/concurrency.rs`, `tests/walk.rs`, `tests/download.rs`,
+- `tests/pipelined.rs`, `tests/round_trip.rs`, `tests/concurrency.rs`, `tests/walk.rs`, `tests/download.rs`,
   `tests/upload.rs`, `tests/limits.rs`
 - the `#[cfg(test)] mod tests` in each `src/*.rs`
 - `.github/workflows/test.yml`
@@ -132,9 +137,8 @@ drive a real `Session` against a fake server over an in-memory pipe, and the CI 
   was a throwaway harness outside this repository, and it measured throughput only: it ends on `fstat`
   size, does not reassemble and panics on failure, so it is not a pattern for a caller
   ([#1's result](https://github.com/kihyun1998/justsftp/issues/1#issuecomment-6677251816)).
-- **Nothing here can test a pipelined client yet.** `tests/upload.rs` assembles in arrival order and
-  `tests/download.rs` scripts by arrival. Held-back replies, a short reply among outstanding ones and a
-  failure at k can be built on `tokio::io::duplex`, as
-  `two_requests_in_flight_are_answered_out_of_order_and_each_caller_gets_its_own_reply` is.
+- **`tests/pipelined.rs` holds order, failure and clocks, not throughput.** Nothing in this repository
+  checks that `ReadAhead` and `WriteBehind` are faster; that was measured once from outside it
+  ([file transfer](file-transfer.md)).
 - **Examples marked `ignore` are not compiled**: the two `russh` examples in the
   README and the crate docs would not notice a change in `russh`.

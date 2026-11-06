@@ -3,13 +3,14 @@
 ## The fact
 
 Every loop this crate runs over a handle closes it whichever way the loop ends — at `EOF`, on a
-failure, **and on a stop**. Where the caller drives the handle through `ReadFile` or `WriteFile`,
-the close is a request the caller must make, and forgetting it fails a debug build. A raw `Handle`
+failure, **and on a stop**. Where the caller drives the handle through `ReadFile`, `WriteFile`,
+`ReadAhead` or `WriteBehind`, the close is a request the caller must make, and forgetting it fails a debug build. A raw `Handle`
 from `open_dir`, `open_file` or `open_file_with` is the caller's to close with `close_handle`.
 
 ## Why it is cross-cutting
 
-`list_dir_watched`, `read_file_watched` and `write_file_watched` do not call each other, and
+`list_dir_watched`, `read_file_watched`, `read_file_ahead_watched` and `write_file_watched` do not
+call each other, and
 `close_handle` cannot hold this: the fact is that each loop reaches it on every exit path, which each
 loop arranges separately. `Session::close` is the far end of the same fact, in another territory.
 
@@ -21,7 +22,8 @@ loop arranges separately. `Session::close` is the far end of the same fact, in a
   can do is refuse to be quiet: `ReadFile` and `WriteFile` fire a `debug_assert!`, so forgetting is
   a failing test rather than a server that stops opening files after a few hundred transfers. In
   release it is a leak, which is what it would have been anyway.
-- **A stop is answered only when a batch or chunk lands**, so it waits up to one round trip;
+- **A stop is answered only when a batch or chunk lands**, so it waits up to one round trip, and on
+  `ReadAhead` also for the replies already due;
   ending the loop sooner would mean dropping the future, which skips the close. Once answered, no
   further request goes out.
 
@@ -31,6 +33,8 @@ loop arranges separately. `Session::close` is the far end of the same fact, in a
   walk's error, then the close's.
 - [File transfer](../territory/file-transfer.md) — `read_file_watched` and `write_file_watched` are
   built on `ReadFile` / `WriteFile`, so there is **one** place each kind of handle is closed.
+  `read_file_ahead_watched` is built on `ReadAhead`, whose `close` is a second place; `WriteBehind`'s
+  `close` closes whichever way its flush ends.
 - [Session lifetime](../territory/session-lifetime.md) — `Session::close` drains the writer's queue
   rather than discarding it; the packet most likely to be sitting there is the `SSH_FXP_CLOSE` a
   listing queued.
@@ -52,6 +56,7 @@ than by dropping it: PenTerm's walk says so (`sftp-transfer`, PenTerm `2aec7cd40
 ## Where it will recur
 
 Any new loop that holds a server handle, and any change that keeps requests outstanding when a loop
-ends. A read's late reply needs no draining, because a reply nobody waits for is dropped; a write's
-must be taken before the close, since that is how a failure is learned
-([#1](https://github.com/kihyun1998/justsftp/issues/1)).
+ends. A read's late reply needs no draining for the session's sake, because a reply nobody waits for
+is dropped, but `CLOSE`'s reply comes after it on a server answering in order, so its clock would count
+them; a write's must be taken before the close, since that is how a failure is learned
+([file transfer](../territory/file-transfer.md)).

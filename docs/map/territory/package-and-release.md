@@ -83,6 +83,3 @@ call when it moved out of PenTerm (PenTerm ADR-0089, *Amendment — the crate is
 ## Known holes / open
 
 - **The GitHub social preview has no API.** It is uploaded by hand under Settings → Social preview.
-- **`macros` is a feature of the non-dev `tokio` dependency**, and `src/` uses no `tokio` macro
-  (`git grep` for `select`, `join`, `main` and `test`, 2026-11-06). Whether anything else needs it was
-  not tested by removing it.

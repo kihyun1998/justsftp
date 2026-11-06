@@ -5,11 +5,14 @@
 Moving a file's bytes. Reading: `Session::read` at an offset, `ReadFile` pulled by the caller,
 `read_file_watched` owning the loop. Writing: `Session::write` at an offset, `WriteFile` pushed into
 by the caller, `write_file_watched` owning the loop and asking the caller for each chunk through
-`Feed`. The results say how much moved and whether it was the whole file.
+`Feed`. `ReadAhead` and `WriteBehind` do the same with several requests outstanding. The results say
+how much moved and whether it was the whole file.
 
 ## Governing decisions
 
-**None.**
+No record in this repository. The maintainer's decision on pipelining and its reasons are on
+[#1](https://github.com/kihyun1998/justsftp/issues/1#issuecomment-6677251816), 2026-11-06, and are
+marked below.
 
 ## Design model
 
@@ -24,7 +27,7 @@ by the caller, `write_file_watched` owning the loop and asking the caller for ea
   handed over, and there is no partial-progress case to get wrong.
 - **The watched loops live here and take `chunk_len` from the caller**
   ([mechanism here, policy in the caller](../invariant/mechanism-here-policy-in-the-caller.md)).
-  They are built on `ReadFile` / `WriteFile`, so there is one place each kind of handle is closed and
+  They are built on `ReadFile`, `WriteFile` and `ReadAhead`, so there is one place each kind of handle is closed and
   one place the offset advances ([every handle is closed](../invariant/every-handle-is-closed.md)).
 - **One callback rather than two**, for the reason [listing](listing.md) gives, and the total it
   reports is cumulative.
@@ -87,7 +90,52 @@ by the caller, `write_file_watched` owning the loop and asking the caller for ea
   The crate owns offsets, reassembly and failure position; the caller passes the depth. Decided against
   a depth on the existing types, where `write` would mean "done" or "queued" by how the file was opened
   and `next(len)` does not fit read-ahead, and against leaving it to callers, each of whom would then
-  own reassembly and a contiguous acknowledged offset. Not built; what is still open is below.
+  own reassembly and a contiguous acknowledged offset. Names and the read's watched loop are the
+  maintainer's too (2026-11-06); `WriteBehind` has no watched loop, as nothing known would call it.
+- **Waiting on the front of the queue is the design.** Replies that land early stay in their channels,
+  so there is no reassembly buffer. Memory is `depth` chunks from a server that answers what was asked
+  and `depth × max_inbound_packet` from one that does not, since a reply's length is judged at the
+  front. It settles the rest: bytes leave in
+  file order, `EOF` counts only when it is the front's, a failure is reported after every byte before
+  it, and each clock is the time since the last reply. OpenSSH writes at each reply's offset instead
+  and tracks a contiguous one (R50), which this crate's in-order callback cannot do.
+- **`next` sends only when called**, and after a failure or `EOF` gives up what was due. Calling again
+  asks again from `offset`, the contract `ReadFile::next` already has, so a retry needs no reopening
+  unless the caller wants one. A stop therefore sends nothing further.
+- **`ReadAhead::close` takes the replies still due before it sends `CLOSE`, on the front's clock.** A
+  server answering in order puts `CLOSE`'s reply behind them, so sending it first costs no time and
+  charges all of them to one budget: a stop on a slow link came back `Timeout`, losing
+  `Download::stopped` (`a_stop_on_a_slow_link_still_says_it_stopped`). A reply that does not come in
+  time ends the wait, and `CLOSE` still goes.
+- **`ReadAhead` refuses a reply longer than asked** (`TooLong`), since it would overlap the next offset;
+  `ReadFile` still accepts one, below. A zero-length reply is handed over as an empty chunk and asked
+  again, the rule the loops above already follow; OpenSSH ends on a second one (R48).
+- **No ramp.** The first `next` sends `depth` requests, where OpenSSH starts at one and adds per reply
+  (R47): a small file costs extra requests and no extra round trip, and nothing has measured that as a
+  problem. Nor does a short reply shrink later requests (R49): the caller fixed the chunk.
+- **A failed `WriteBehind` stays failed.** Bytes past `acknowledged` were given to it and are not held,
+  so accepting another write could only continue from the wrong place. It gives up the replies still
+  due, which cannot move the contiguous offset, where OpenSSH takes them (R51). Every later call repeats the failure (`Error::repeated`, as `Error` cannot be
+  `Clone`) and `close` still closes. A refusal for
+  length sends nothing and is not a failure. It does not truncate: on a dead link it could not, and it
+  would change a server's file unasked (maintainer, 2026-11-06). `depth` is `NonZeroUsize` and a read's
+  `chunk_len` is `NonZeroU32`, so no check is needed for a queue that could never be sent or a read that
+  could never advance.
+- **Both `close`s wait before they send `CLOSE`, unlike every other close here.** Dropped while waiting,
+  they send none, so `closed` is set only once the wait is over and the drop assertion still fires. A
+  caller bounding one with an outer timeout leaks the handle.
+- **The drop assertions stay quiet during a panic.** A second panic aborts the process, which turned
+  one failing test into a run with no results.
+- **Against OpenSSH 9.6 through a relay at RTT 30 ms and 1 Gbit/s**, measured 2026-11-06 on the final
+  code, median MB/s of 3 runs: `ReadAhead` 7.8 at depth 1, 30.5 at 4, 33.7 at 8, 33.7 at 16, and 106.6 at
+  64 with a 16 MiB window; `WriteBehind` 7.7, 30.5, 57.9, 50.7, where depth 16 ranged from 47.2 to 60.8.
+  Every file matched byte for byte, including 320 real short replies from asking above what
+  `sftp-server` hands out at once. Cutting the link mid-upload six times left a correct prefix up to
+  `acknowledged`, with the file longer than it and, since writes reached that server in order, no hole.
+- **Short replies and deep uploads cost something with no delay, by amounts these runs do not pin.** In
+  two runs each: 8 requests asking above the server's length moved 104 and 269 MB/s against 402 and 591
+  at the length it states, and an upload at depth 64 moved 103 and 125 MB/s against 221 and 287 at depth
+  8. Why depth lowers that rate has not been looked into.
 
 ## Code
 
@@ -96,15 +144,20 @@ by the caller, `write_file_watched` owning the loop and asking the caller for ea
   (`write`, `written`, `close`, `Drop`), `Feed`, `Upload`, `Session::write_file`,
   `Session::overwrite_file`, `Session::write_file_from`, `Session::write_file_watched`,
   `Session::write`
-- `tests/download.rs`, `tests/upload.rs`
+- `src/pipeline.rs` — `ReadAhead` (`next`, `offset`, `close`), `WriteBehind` (`write`, `flush`,
+  `acknowledged`, `offset`, `max_chunk`, `close`), `Session::read_file_ahead`,
+  `Session::read_file_ahead_from`, `Session::read_file_ahead_watched`, `Session::write_file_behind`,
+  `Session::write_file_behind_from`
+- `tests/download.rs`, `tests/upload.rs`, `tests/pipelined.rs`
 
 ## Reference behaviour
 
 - OpenSSH's `sftp_download` and `sftp_upload` keep many requests outstanding, track a contiguous offset
   apart from the highest one, re-request the rest of a short reply and end on a reply longer than asked
   (R46 to R51). `russh-sftp` pipelines writes only (R53). Each was read for
-  [#1](https://github.com/kihyun1998/justsftp/issues/1). Nothing in this crate's loops today was derived
-  from either.
+  [#1](https://github.com/kihyun1998/justsftp/issues/1). The refusal of a reply longer than asked and
+  the contiguous offset follow OpenSSH; the front-of-queue wait does not, and writes are shaped like
+  `russh-sftp`'s oldest-ack wait, with clocks it does not have.
 
 ## Cross-cutting invariants
 
@@ -119,9 +172,9 @@ by the caller, `write_file_watched` owning the loop and asking the caller for ea
   chunks refused or misjudged.
 - [Listing](listing.md) — the watched loops share one promise about stopping and closing; a change to
   one leaves the other promising the old one.
-- [Request pairing](request-pairing.md) — one request is in flight per `next` and `write` because each
-  awaits `Session::request`. Anything that keeps several outstanding reaches into `enqueue` and that
-  note's cancellation and clock rules.
+- [Request pairing](request-pairing.md) — `ReadFile` and `WriteFile` keep one request in flight because
+  each call awaits `Session::request`; `ReadAhead` and `WriteBehind` hold `Sent`s, so that note's
+  cancellation and clock rules are what keeps their queues correct.
 - [Errors](errors.md) — both loops read `StatusCode::Eof` as the end, and `written` counts what
   `expect_ok` accepted.
 - [Verification](verification.md) — `download.rs` and `upload.rs` servers read and answer one frame at
@@ -132,17 +185,31 @@ by the caller, `write_file_watched` owning the loop and asking the caller for ea
 
 ## Known holes / open
 
-- **Pipelining's new types are not built, and these are open.** Their names; how a failed upload
-  reports its contiguous acknowledged offset; whether the watched loops get a depth path; a server
-  short on every request; `EOF` with later offsets outstanding; what a stop promises when replies are
-  still due. Tracked: [#1](https://github.com/kihyun1998/justsftp/issues/1).
-- **Resuming from a destination's size stops being safe once writes overlap.** A write failing at k
+- **What a ramp would save on many small files is unmeasured**, and so is whether shrinking requests
+  would recover what a server short on every request costs at a real RTT.
+- **`close` can lose the resume point.** It consumes the value, and a caller that writes and then closes
+  gets the failure with no `acknowledged` to read; it must `flush` first, which only a doc comment says.
+- **`close` has no overall deadline.** A server answering just inside each budget can hold it for
+  `depth` times the two budgets.
+- **A length of 0 is still accepted on the older paths.** `ReadAhead`'s `chunk_len` is a `NonZeroU32`, but
+  `read_file_watched` and `ReadFile::next` take a `u32`: answered with `EOF`, 0 reports a complete empty
+  file, and answered with empty `DATA`, empty chunks forever. Changing them is a breaking change.
+- **Resuming from a destination's size is not safe after a `WriteBehind` failure.** A write failing at k
   with k+1 accepted leaves a hole, and that caller reads it as a correct prefix. PenTerm resumes this way
-  (`resume_verdict` in `explorer_transfer/engine.rs`, PenTerm `2aec7cd40`, 2026-11-06).
+  (`resume_verdict` in `explorer_transfer/engine.rs`, PenTerm `2aec7cd40`, 2026-11-06), so moving it to
+  this type also means resuming from `acknowledged`. A cut link left none, measured above; a failure
+  from the server itself, a full disk for one, has not been measured.
+- **`chunk_len` is fixed at open, before a sink exists.** PenTerm's `copy_file` opens the source first
+  and takes the chunk from the sink's handle (`max_chunk`), so a remote-to-remote copy through
+  `ReadAhead` cannot size the chunk for its sink without opening it first, which truncates a destination
+  before the source is known readable. `ReadFile` remains the shape for that case.
+- **`ReadAhead` promises file order, and a device file that ignores offsets cannot keep it.** OpenSSH
+  refuses a non-regular source (`sftp-client.c:1651-1655`, at 102bee7); this crate does not `stat` first.
+  No such server was tried.
 - **Zero-length `DATA` and an endless empty `Feed::Bytes`** are unguarded on purpose, above.
 - **A `DATA` reply longer than was asked for is accepted.** `Session::read` does not compare it with
   `len`, and `ReadFile::next` advances the offset by what arrived. The inbound ceiling is the only
-  bound. Found by reading `Session::read`; no server is known to do this. With offsets outstanding it
-  would overlap a later one, and OpenSSH ends the transfer on it (R48).
+  bound. Found by reading `Session::read`; no server is known to do this. `ReadAhead` refuses one, and
+  OpenSSH ends the transfer on it (R48).
 - **`overwrite_file` against a server that enforces § 6.3** is unmeasured; such a server may refuse
   `TRUNCATE` without `CREATE`.

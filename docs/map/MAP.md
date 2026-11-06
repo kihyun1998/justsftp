@@ -18,8 +18,9 @@ Written in English, as the README and `CLAUDE.md` are: an agent reads this at th
 justsftp is an SFTP v3 client over any async byte stream. It opens a session (handshake, version gate,
 limits query), pairs each request with its reply through a reader task and a writer task on two
 clocks, encodes packets with a hand-rolled cursor, keeps attributes as a read-only type and an update
-type, and offers verbs: listing, whole-file transfer (pull, push, watched loops, resume) and path
-verbs. The caller sizes chunks within lengths the crate reports. It ships to crates.io from a tag, and
+type, and offers verbs: listing, whole-file transfer (pull, push, watched loops, resume, several
+requests outstanding) and path verbs. The caller sizes chunks within lengths the crate reports and
+chooses any depth. It ships to crates.io from a tag, and
 its known consumer is PenTerm. **The largest gap is that nothing here has met a real server**: every
 server in the repository is a fixture ([verification](territory/verification.md)).
 

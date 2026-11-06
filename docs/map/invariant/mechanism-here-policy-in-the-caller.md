@@ -38,11 +38,12 @@ leaving it the choice.
 - [File transfer](../territory/file-transfer.md) — `read_file_watched` sends `chunk_len` as each
   `READ`'s length and does not reach for `max_read_len` on its own; `write_file_watched` passes
   `chunk_len` to `next` and writes what comes back unsplit, so the caller reads exactly what fits
-  from its source instead of the crate re-splitting it.
+  from its source instead of the crate re-splitting it. `ReadAhead` and `WriteBehind` take the depth as
+  a required argument, and nothing here holds a default.
 - [Transfer lengths](../territory/transfer-lengths.md) — `Config::max_outbound_packet` refuses;
   `max_read_len` and `WriteFile::max_chunk` report what fits so a caller can split.
-- [Request pairing](../territory/request-pairing.md) — `enqueue` returns the reply receiver without
-  awaiting, the seam a pipelining policy would use; it stays private until one is measured.
+- [Request pairing](../territory/request-pairing.md) — `enqueue` returns without awaiting and stays
+  private to the crate; a caller gets depth through the transfer types.
 - [Errors](../territory/errors.md) — `Status.message` is handed over verbatim; whether it may be
   shown, and after what sanitising, is the caller's.
 - [Paths are bytes](paths-are-bytes.md) — drawing a name is the caller's.
@@ -63,5 +64,5 @@ here.
 
 ## Where it will recur
 
-Any new constant that decides something a caller might decide differently. A decision about depth is
-the next one: [#1](https://github.com/kihyun1998/justsftp/issues/1) asks who chooses it.
+Any new constant that decides something a caller might decide differently: a default depth, a
+session-wide cap, a ramp.

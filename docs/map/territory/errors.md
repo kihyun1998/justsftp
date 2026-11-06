@@ -22,8 +22,11 @@ the status number as it comes off the wire.
   That reasoning is about what a *correct* server does; a client that turns a protocol violation into
   a decode failure loses the ability to report what the server actually said. The value is carried
   and the caller decides.
-- **`Eof` is not an error.** It is how the server ends a directory walk and a file read, so
-  `is_error` excludes it with `Ok`.
+- **`Eof` is not an error, and answers only a walk and a read.** It is how the server ends a directory
+  walk and a file read, so `is_error` excludes it with `Ok`. It does not answer anything else:
+  `status_ok`, behind every verb that expects a status, accepts `Ok` alone, as OpenSSH does for a write
+  (R51). Otherwise a `WRITE` answered with `EOF` would count as acknowledged, past bytes the server may
+  not hold, and a caller would resume after them.
 - **`Status.message` is prose a remote server wrote**, parsed as text and handed over verbatim,
   escape sequences and control characters included. Every other `Error` variant is a structured
   value, not a sentence. Whether it may be shown is the caller's
@@ -47,13 +50,18 @@ the status number as it comes off the wire.
 - **`Truncated` carries what was asked for and what was left**, so a fixture that is one byte short
   says so instead of saying "bad message".
 - **`TooLong` is the guard against an allocation sized by the far end**
-  ([the far end sizes nothing](../invariant/the-far-end-sizes-nothing.md)), and also the outbound
-  refusal ([transfer lengths](transfer-lengths.md)).
+  ([the far end sizes nothing](../invariant/the-far-end-sizes-nothing.md)), the outbound refusal
+  ([transfer lengths](transfer-lengths.md)), and `ReadAhead`'s refusal of a reply longer than asked.
+  A new variant was not added for that: `Error` is not `non_exhaustive`, so one would break an
+  exhaustive `match`.
+- **`Error::repeated` is not `Clone`.** `std::io::Error` cannot be cloned, so an `Io` repeats with its
+  kind and text only; the rest are copied. A `WriteBehind` holds it for the calls after a failure.
 
 ## Code
 
 - `src/error.rs` — `Result`, `StatusCode` (`from_wire`, `to_wire`, `is_error`), `Status`, `Error`
-- `src/client.rs` — `unexpected`
+  (`repeated`)
+- `src/client.rs` — `unexpected`, `status_ok`
 
 ## Reference behaviour
 
@@ -82,6 +90,4 @@ the status number as it comes off the wire.
 
 ## Known holes / open
 
-- **A `STATUS` of `Eof` counts as success for `expect_ok`**, because it tests `!is_error()`. A server
-  answering a `WRITE` with `EOF` therefore reads as acknowledged, and `WriteFile::written` advances.
-  Found by reading `expect_ok`; no server is known to do this.
+**None.**
