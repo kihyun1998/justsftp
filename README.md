@@ -86,7 +86,9 @@ let session = justsftp::Session::open(channel.into_stream(), justsftp::Config::d
 - **It does not decode names.** How to show a byte filename is your decision.
 - **It does not pipeline unless asked.** Each call has one request in flight, and only `ReadAhead` and
   `WriteBehind` keep more. It does not choose a depth: what helps depends on the SSH channel window,
-  which it cannot see.
+  which it cannot see. Other requests on the session wait behind what is outstanding. Where they must
+  stay quick, lower the depth; a second SFTP channel stops the wait growing with depth, but helps less
+  on a very slow link.
 - **No `SSH_FXP_SYMLINK`.** Servers disagree on its argument order.
 - **v3 only.** A server offering another version is refused at the handshake.
 - **A server's status message is passed on as sent**, control characters included. Treat it as

@@ -132,10 +132,13 @@ marked below.
   Every file matched byte for byte, including 320 real short replies from asking above what
   `sftp-server` hands out at once. Cutting the link mid-upload six times left a correct prefix up to
   `acknowledged`, with the file longer than it and, since writes reached that server in order, no hole.
-- **Short replies and deep uploads cost something with no delay, by amounts these runs do not pin.** In
-  two runs each: 8 requests asking above the server's length moved 104 and 269 MB/s against 402 and 591
-  at the length it states, and an upload at depth 64 moved 103 and 125 MB/s against 221 and 287 at depth
-  8. Why depth lowers that rate has not been looked into.
+- **Asking above the server's length looked slower with no delay, on two runs each**: 8 requests moved
+  104 and 269 MB/s against 402 and 591 at the length it states. Too few runs to say by how much, or
+  whether at all, given the next item.
+- **A deep upload was not found to be slower.** With no delay, 5 runs per depth from 1 to 64, the medians
+  show no trend (107 to 179 MB/s) and single runs range from 61 to 563; OpenSSH's `sftp` at the same depth
+  and chunk varies the same way. An earlier two-run difference was noise on this path, and a small
+  effect is not excluded ([#2](https://github.com/kihyun1998/justsftp/issues/2#issuecomment-6678676352)).
 
 ## Code
 

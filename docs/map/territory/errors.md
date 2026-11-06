@@ -39,9 +39,10 @@ the status number as it comes off the wire.
     no error for the inverse, a reply nothing waits on: `read_loop` drops it
     ([request pairing](request-pairing.md)). An earlier draft reused an "unknown id" variant for the
     wrapped counter, so the log line read as the opposite of what happened.
-  - `WriteTimeout` versus `Timeout` — `Timeout` means the server did not answer; `WriteTimeout`
-    means the bytes never got out, a peer that accepted the subsystem and then stopped reading so the
-    channel window never reopens. Collapsing the two reports "the server is slow" for a connection
+  - `WriteTimeout` versus `Timeout` — `Timeout` means no answer arrived in budget; `WriteTimeout`
+    means the bytes did not get out, a peer that accepted the subsystem and then stopped reading so the
+    channel window never reopens. Either can also be a slow link with other requests ahead
+    ([request pairing](request-pairing.md)). Collapsing the two reports "the server is slow" for a connection
     that is wedged ([request pairing](request-pairing.md)).
   - `SessionEnded { cause }` versus `Eof` — `Eof` is a false statement for a `TooLong` refusal,
     where the stream is not over and this client refused to continue.

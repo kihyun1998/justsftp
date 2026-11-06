@@ -21,14 +21,22 @@ struct PendingRead {
 ///
 /// Replies that arrive early wait in memory: `depth` chunks from a server that answers what was
 /// asked, and at most `depth` times [`crate::Config::max_inbound_packet`] from one that does not,
-/// since a reply's length is checked when it reaches the front. The first [`Self::next`] sends `depth` requests whatever the file's size, and each later call sends what
-/// the last one took; between calls nothing is sent. Every request gets its own
-/// [`crate::Config::request_timeout`] from when it reaches the front of the queue.
+/// since a reply's length is checked when it reaches the front. The first [`Self::next`] sends
+/// `depth` requests whatever the file's size, and each later call sends what the last one took;
+/// between calls nothing is sent. Every request gets its own [`crate::Config::request_timeout`] from
+/// when it reaches the front of the queue.
 ///
 /// How much depth helps depends on the SSH channel window under this crate, which it cannot see:
 /// past what the window holds, more depth moves no more bytes and only waits longer.
 ///
-/// ?좑툘 **[`Self::close`] must be called**, for the same reason as on [`crate::ReadFile`].
+/// **Other requests on the same [`Session`] wait behind what is outstanding.** Against OpenSSH's
+/// server that is about `depth` chunks at the link's rate, so a slow link can make them report
+/// [`Error::Timeout`] or [`Error::WriteTimeout`] with nothing wrong. Where they must stay quick, lower
+/// the depth. A second [`Session`] over another SFTP channel of the same SSH connection stops the
+/// wait growing with depth, but what the SSH channel window already has on its way still goes
+/// first, so on a very slow link it helps less than a low depth does.
+///
+/// ⚠️ **[`Self::close`] must be called**, for the same reason as on [`crate::ReadFile`].
 pub struct ReadAhead<'a> {
     session: &'a Session,
     handle: Handle,
@@ -150,7 +158,7 @@ impl Drop for ReadAhead<'_> {
     fn drop(&mut self) {
         debug_assert!(
             self.closed || std::thread::panicking(),
-            "a ReadAhead was dropped without close() ??the server handle is leaked. `close_handle` is async and Drop cannot await."
+            "a ReadAhead was dropped without close() — the server handle is leaked. `close_handle` is async and Drop cannot await."
         );
     }
 }
@@ -236,11 +244,18 @@ struct PendingWrite {
 /// front of the queue. As on [`ReadAhead`], past what the SSH channel window holds, more depth moves
 /// no more bytes.
 ///
-/// ?좑툘 **After a failure the file can hold bytes past [`Self::acknowledged`], with a hole before
+/// **Other requests on the same [`Session`] wait behind what is outstanding.** Against OpenSSH's
+/// server that is about `depth` chunks at the link's rate, so a slow link can make them report
+/// [`Error::Timeout`] or [`Error::WriteTimeout`] with nothing wrong. Where they must stay quick, lower
+/// the depth. A second [`Session`] over another SFTP channel of the same SSH connection stops the
+/// wait growing with depth, but what the SSH channel window already has on its way still goes
+/// first, so on a very slow link it helps less than a low depth does.
+///
+/// ⚠️ **After a failure the file can hold bytes past [`Self::acknowledged`], with a hole before
 /// them**: one write can fail while the next is accepted. Resume from that offset, not from the
 /// file's size.
 ///
-/// ?좑툘 **[`Self::close`] must be called**, for the same reason as on [`crate::WriteFile`].
+/// ⚠️ **[`Self::close`] must be called**, for the same reason as on [`crate::WriteFile`].
 pub struct WriteBehind<'a> {
     session: &'a Session,
     handle: Handle,
@@ -362,7 +377,7 @@ impl Drop for WriteBehind<'_> {
     fn drop(&mut self) {
         debug_assert!(
             self.closed || std::thread::panicking(),
-            "a WriteBehind was dropped without close() ??the server handle is leaked. `close_handle` is async and Drop cannot await."
+            "a WriteBehind was dropped without close() — the server handle is leaked. `close_handle` is async and Drop cannot await."
         );
     }
 }
@@ -380,7 +395,7 @@ impl Session {
         Ok(self.write_behind(handle, 0, depth))
     }
 
-    /// Opens a file for writing and continues from `offset`, keeping what is already there ??the
+    /// Opens a file for writing and continues from `offset`, keeping what is already there — the
     /// flags of [`Self::write_file_from`] and the same duty on the caller: the bytes before `offset`
     /// must be a correct prefix of the source.
     pub async fn write_file_behind_from(

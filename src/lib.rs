@@ -64,6 +64,8 @@
 //!
 //! One request at a time moves one chunk per round trip. [`ReadAhead`] and [`WriteBehind`] keep up
 //! to a depth of your choosing outstanding, and still hand bytes over in file order.
+//! Other requests on the same session wait behind them, which on a slow link can reach a timeout:
+//! both types say how to keep those requests quick.
 //!
 //! ```no_run
 //! # async fn demo(session: justsftp::Session) -> Result<(), justsftp::Error> {

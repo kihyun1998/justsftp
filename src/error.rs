@@ -143,13 +143,15 @@ pub enum Error {
         cause: std::sync::Arc<Error>,
     },
     /// The request's bytes did not reach the stream within [`Config::write_timeout`]: the peer
-    /// stopped reading. Not the same as [`Error::Timeout`].
+    /// stopped reading, or on a slow link, what was queued ahead of it took too long. Not the same as
+    /// [`Error::Timeout`].
     ///
     /// [`Config::write_timeout`]: crate::Config::write_timeout
     WriteTimeout,
     /// The request was written and no reply arrived within [`Config::request_timeout`], counted
     /// from when the bytes reached the stream, or, on a [`crate::ReadAhead`] or [`crate::WriteBehind`],
-    /// from when the wait for this reply began. Also the handshake's, where one budget covers
+    /// from when the wait for this reply began. Replies owed ahead of it count, so a slow link can cause
+    /// it with nothing wrong. Also the handshake's, where one budget covers
     /// writing `SSH_FXP_INIT` and the reply.
     ///
     /// [`Config::request_timeout`]: crate::Config::request_timeout

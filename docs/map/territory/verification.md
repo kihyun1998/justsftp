@@ -133,12 +133,15 @@ drive a real `Session` against a fake server over an in-memory pipe, and the CI 
 
 ## Known holes / open
 
-- **No test runs against a real server.** Every server here is a fixture. The one run against OpenSSH
-  was a throwaway harness outside this repository, and it measured throughput only: it ends on `fstat`
-  size, does not reassemble and panics on failure, so it is not a pattern for a caller
-  ([#1's result](https://github.com/kihyun1998/justsftp/issues/1#issuecomment-6677251816)).
+- **No test runs against a real server.** Every server here is a fixture. Runs against OpenSSH used
+  throwaway harnesses outside this repository. The first measured throughput through concurrent
+  `Session` calls: it ends on `fstat` size, does not reassemble and panics on failure, so it is not a
+  pattern for a caller ([#1's result](https://github.com/kihyun1998/justsftp/issues/1#issuecomment-6677251816)).
+  [#2's](https://github.com/kihyun1998/justsftp/issues/2#issuecomment-6678676352) measured a `stat`'s wait
+  during a transfer.
 - **`tests/pipelined.rs` holds order, failure and clocks, not throughput.** Nothing in this repository
-  checks that `ReadAhead` and `WriteBehind` are faster; that was measured once from outside it
-  ([file transfer](file-transfer.md)).
+  checks that `ReadAhead` and `WriteBehind` are faster; that was measured from outside it
+  ([file transfer](file-transfer.md)). With no delay, single upload runs on that path differed by several
+  times, so a comparison there needs more than two runs.
 - **Examples marked `ignore` are not compiled**: the two `russh` examples in the
   README and the crate docs would not notice a change in `russh`.

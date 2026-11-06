@@ -10,7 +10,9 @@ Two of the eight upstream traps are here, both on the concurrency path
 
 ## Governing decisions
 
-**None.**
+No record in this repository. The maintainer's decision against a session-wide cap is on
+[#2](https://github.com/kihyun1998/justsftp/issues/2#issuecomment-6678676352), 2026-11-06, and is marked
+below.
 
 ## Design model
 
@@ -117,6 +119,26 @@ recoverable by a later change.
   about 557 KB/s `Timeout`. `ReadAhead` and `WriteBehind` call `reply_to` on the front only, so each
   budget there is the time since the last reply; `the_reply_clock_runs_from_the_front_of_the_queue` and
   `the_write_clock_runs_from_the_front_of_the_queue` hold it. That protects their own replies only.
+- **Other requests on the session wait behind a deep queue, and no session-wide cap bounds that**
+  (maintainer, 2026-11-06, [#2](https://github.com/kihyun1998/justsftp/issues/2#issuecomment-6678676352)).
+  They wait on their own clock. A `stat` during a transfer, against OpenSSH 9.6 through a relay at RTT
+  30 ms, russh 0.63.1, chunk 261,120, download / upload:
+
+  | Rate | Depth 1 | Depth 8 | Depth 16 | Depth 64 |
+  |---|---|---|---|---|
+  | 100 KB/s | 2.3 / 2.3 s | 20.4 / 20.6 s | `Timeout` / 41.0 s | `Timeout` / `WriteTimeout` |
+  | 300 KB/s | 0.6 / 0.6 s | 6.5 / 6.7 s | 13.5 / 13.6 s | `Timeout` / 55.4 s |
+  | 1 MB/s | 0.3 / 0.2 s | 2.0 / 2.0 s | 4.1 / 4.1 s | 16.6 / 16.7 s |
+
+  That is about `depth × chunk ÷ rate`. A cap of N waits the same as choosing depth N and does not
+  shorten one transfer's wait, so the depth stays the caller's and the public docs say how to keep
+  requests quick. A second SFTP channel on the connection took the same `stat` at depth 64 to 18.1 /
+  20.7 s at 100 KB/s and 1.3 / 2.1 s at 1 MB/s, no longer rising with depth; at depth 8 and 100 KB/s it
+  barely changed (18.1 / 20.4 s), so there a low depth (2.3 s) does far better. Bounding the sum across
+  many concurrent files was not part of that decision, and stays the caller's. Not measured: a bounded
+  relay queue or loss, other servers, a transfer's throughput with a second channel open. PenTerm's walk
+  and transfer share `end.session` (`explorer_transfer/commands.rs`, PenTerm `2aec7cd40`, 2026-11-06);
+  whether they overlap was not confirmed.
 - **`reply_to` can be dropped and called again.** It takes `written` out only once that is finished, so
   a retry never polls a finished receiver; that is what makes `ReadAhead::next` and
   `WriteBehind::flush` cancel-safe. A retry starts its clock again, so a caller cancelling on a shorter
@@ -153,10 +175,6 @@ recoverable by a later change.
 
 ## Known holes / open
 
-- **No session-wide cap on outstanding requests.** Each `ReadAhead` and `WriteBehind` has its own depth,
-  and they add up. Any other request on the session waits behind them on its own clock, so on a slow
-  link it can report `Timeout` while nothing is wrong: at the sizes above, about 557 KB/s at depth 64
-  and 70 KB/s at depth 8, calculated. PenTerm runs a walk and a transfer on one session.
 - **The outbound queue has no bound.** `outbound` is an `mpsc::unbounded_channel` of whole encoded
   packets. Its depth is the sum of every caller's concurrency and every `ReadAhead` and `WriteBehind`
   depth, and nothing limits that sum.
