@@ -83,9 +83,12 @@ Plus `FileType`, read from the POSIX mode word, and the `ATTR_EXTENDED` tail.
 
 ## Blast radius
 
-- [Packets](packets.md) — `DirEntry`, `Request::Open`, `SetStat`, `MkDir` carry these.
-- [Path verbs](path-verbs.md) — `set_stat` takes an `AttrsUpdate`; `stat`/`lstat`/`fstat` return
-  `FileAttributes`.
+- [Packets](packets.md) — a `NAME` entry's end is found only by decoding its attributes to the last
+  field, so a decoder slip here misframes every later entry in that packet.
+- [Path verbs](path-verbs.md) — `set_stat` relies on no value read from a server being able to become
+  an `AttrsUpdate`; adding a conversion reopens the truncation this split prevents.
+- [File transfer](file-transfer.md) — `open_file_with` and every `OPEN` send an `AttrsUpdate`; an
+  empty one that gains a field changes every file this crate creates.
 
 ## Known holes / open
 

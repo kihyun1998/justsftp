@@ -73,6 +73,10 @@ by the caller, `write_file_watched` owning the loop and asking the caller for ea
   ([transfer lengths](transfer-lengths.md)).
 - **An empty file is `OPEN` then one `READ` answering `EOF`**; the callback is never invoked, so a
   caller's "finished" signal must not depend on the first chunk.
+- **`ReadFile` and `WriteFile` are the shape the known consumer drives.** PenTerm's transfer engine
+  holds them across its own loop, and its drag-out reader calls `open_file` and `Session::read`
+  directly (`explorer_transfer/engine.rs`, `explorer_drag_out/remote.rs`, PenTerm `2aec7cd40`,
+  2026-11-06), so their signatures carry a caller who is not in this repository.
 
 ## Code
 
@@ -85,7 +89,10 @@ by the caller, `write_file_watched` owning the loop and asking the caller for ea
 
 ## Reference behaviour
 
-**None.** No other client's transfer loop was read.
+- OpenSSH's `sftp-client.c` download loop was read for
+  [#1](https://github.com/kihyun1998/justsftp/issues/1), at the commit that issue names. Its upload
+  loop was not, and no other client's transfer loop was. Nothing in this crate's loops was derived from
+  either.
 
 ## Cross-cutting invariants
 
@@ -95,11 +102,31 @@ by the caller, `write_file_watched` owning the loop and asking the caller for ea
 
 ## Blast radius
 
-- [Transfer lengths](transfer-lengths.md) — `max_chunk`, `max_read_len`, the server's write bound.
-- [Listing](listing.md) — the watched loops share one shape.
+- [Transfer lengths](transfer-lengths.md) — a caller splits by `max_read_len` and `max_chunk`, and
+  `write` is refused above them; a loop that stopped asking for these lengths would have its full
+  chunks refused or misjudged.
+- [Listing](listing.md) — the watched loops share one promise about stopping and closing; a change to
+  one leaves the other promising the old one.
+- [Request pairing](request-pairing.md) — one request is in flight per `next` and `write` because each
+  awaits `Session::request`. Anything that keeps several outstanding reaches into `enqueue` and that
+  note's cancellation and clock rules.
+- [Errors](errors.md) — both loops read `StatusCode::Eof` as the end, and `written` counts what
+  `expect_ok` accepted.
+- [Verification](verification.md) — `download.rs` and `upload.rs` servers read and answer one frame at
+  a time, so they assert order a different request shape would not keep.
+- [Package](package-and-release.md) — these signatures are public and PenTerm drives them from outside
+  this repository's CI, and the README and crate docs state how many requests a call keeps in flight;
+  a change here can be a breaking one and can falsify those sentences.
 
 ## Known holes / open
 
+- **Pipelining.** A large transfer moves one chunk per round trip, and the design questions it raises
+  for `ReadFile` and `WriteFile` — short reads with later offsets outstanding, reply order, draining
+  after `EOF` or a failure, what `written` means, what a stop promises — are not decided. Tracked:
+  [#1](https://github.com/kihyun1998/justsftp/issues/1).
 - **Zero-length `DATA` and an endless empty `Feed::Bytes`** are unguarded on purpose, above.
+- **A `DATA` reply longer than was asked for is accepted.** `Session::read` does not compare it with
+  `len`, and `ReadFile::next` advances the offset by what arrived. The inbound ceiling is the only
+  bound. Found by reading `Session::read`; no server is known to do this.
 - **`overwrite_file` against a server that enforces § 6.3** is unmeasured; such a server may refuse
   `TRUNCATE` without `CREATE`.

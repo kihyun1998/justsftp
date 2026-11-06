@@ -16,7 +16,7 @@ Single-context: one `GLOSSARY.md` + `docs/adr/` at the repo root. See `docs/agen
 
 ### Map
 
-Before changing code, read `docs/map/MAP.md` and the territory note for what you are touching; its `## Blast radius` and `## Cross-cutting invariants` are a checklist. An upstream fact is a row in `docs/map/reference.md`, pinned to a version.
+Before designing a change, read [`docs/map/MAP.md`](docs/map/MAP.md) and the territory note for what you are touching; its `## Blast radius` and `## Cross-cutting invariants` are a checklist. After it lands, update each note whose rule it changed. When a fix reveals a fact, ask whether it holds at every site that shares the same assumption; if it does, the fix lands with an invariant note. An upstream fact is a row in `docs/map/reference.md`, pinned to a version.
 
 ## Comments
 

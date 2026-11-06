@@ -50,8 +50,14 @@ fields — and wrapping a body in the outer frame `u32 length | u8 type | body`.
 
 ## Blast radius
 
-- [Packets](packets.md) — every request and response is built on this cursor.
-- [File attributes](file-attributes.md) — decodes and encodes through it.
+- [Packets](packets.md) and [file attributes](file-attributes.md) — they trust `string` to return the
+  server's bytes untouched and `take` to refuse a length past the end. Weakening either makes both
+  decoders lose names or panic, with no change in their own code.
+- [Session lifetime](session-lifetime.md) — `read_packet` is a second reader of the frame format, on
+  the stream rather than through `frame`; the rule that the length counts the type byte is written in
+  both.
+- [Verification](verification.md) — several test files carry their own `read_frame`, on purpose, so a
+  framing change is not followed by them.
 
 ## Known holes / open
 

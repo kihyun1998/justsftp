@@ -45,7 +45,14 @@ reply's shape.
 
 ## Blast radius
 
-- [File attributes](file-attributes.md), [packets](packets.md), [errors](errors.md).
+- [File attributes](file-attributes.md) — `set_stat` and `open_file_with` are safe only while an
+  `AttrsUpdate` starts empty and cannot come from a read value.
+- [Packets](packets.md) — `rename`'s argument order and `open_file`'s mandatory attributes block live
+  in `Request::encode`; these verbs cannot enforce them.
+- [Errors](errors.md) — a caller branches on `Error::Status` here, because `unexpected` turns a
+  failing `STATUS` into it whatever reply the verb wanted.
+- [File transfer](file-transfer.md) and [listing](listing.md) — their loops rely on `close_handle`
+  and `open_file`; a change to either changes how every loop ends and starts.
 
 ## Known holes / open
 

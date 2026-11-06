@@ -63,13 +63,25 @@ the status number as it comes off the wire.
 ## Cross-cutting invariants
 
 - [Mechanism here, policy in the caller](../invariant/mechanism-here-policy-in-the-caller.md)
+- [Paths are bytes](../invariant/paths-are-bytes.md) — `Status.message` and `language_tag` are its
+  only exception.
 
 ## Blast radius
 
-- [Request pairing](request-pairing.md) — produces `RequestIdInUse`, `WriteTimeout`, `Timeout`,
-  `SessionEnded`, `Eof`.
-- [Packets](packets.md) — decodes `Status`.
+- [Request pairing](request-pairing.md) — a caller's retry decision reads the difference between
+  `RequestIdInUse`, `WriteTimeout`, `Timeout`, `SessionEnded` and `Eof`; merging or renaming a
+  variant here changes what those paths mean.
+- [Session lifetime](session-lifetime.md) — `query_limits` fails the open on exactly `Eof`,
+  `SessionEnded` and `WriteTimeout` and treats everything else as "no limits"; a new connection-level
+  variant is silently read as "no limits" until it is added there.
+- [Packets](packets.md) — `StatusCode::from_wire` must hold every number `Response::decode` reads, or
+  a reply fails as a decode error instead of a status.
+- [Listing](listing.md) and [file transfer](file-transfer.md) — both end their loops on
+  `StatusCode::Eof`; `is_error` deciding otherwise turns every completed walk and download into a
+  failure.
 
 ## Known holes / open
 
-**None.**
+- **A `STATUS` of `Eof` counts as success for `expect_ok`**, because it tests `!is_error()`. A server
+  answering a `WRITE` with `EOF` therefore reads as acknowledged, and `WriteFile::written` advances.
+  Found by reading `expect_ok`; no server is known to do this.

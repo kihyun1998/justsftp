@@ -50,8 +50,17 @@ How big a packet may be in each direction, and how much data fits in one `SSH_FX
 - **A field of `0` is "no limit stated"** (`stated`; R41).
 - **Lengths floor at 64 bytes** (`SMALLEST_TRANSFER_LEN`), as OpenSSH's own client does after
   `sftp_get_limits` (R43), so a broken server cannot drive a chunk to zero and stall a transfer.
+- **The floor also covers the packet bound, so it can exceed what the server stated.**
+  `server_write_len` applies it after taking the smaller of the write field and the packet field less
+  the header. A server stating a packet under 64 + header therefore gets writes it refuses: a failed
+  transfer rather than a stall. PenTerm's note records that OpenSSH floors only read and write and
+  ignores the packet field, and that its client reads a `0` as a limit where this crate reads no limit
+  (`sftp-transfer`, PenTerm `2aec7cd40`, 2026-11-06; not re-read upstream).
+- **`max_open_handles` is decoded and reported, and nothing here acts on it.** It reaches a caller
+  through `Session::server_limits`; no verb counts handles.
 - **`server_read_len` carries none of this client's ceiling**, for a caller whose read size is set
-  by something else and only needs the server's bound.
+  by something else and only needs the server's bound. PenTerm's transfer engine is that caller: its
+  sink sets the size and this caps it (`explorer_transfer/engine.rs`, PenTerm `2aec7cd40`, 2026-11-06).
 - **Real OpenSSH states 261,120 for read and write** (PenTerm), under this client's defaults, so the
   limits lower lengths on the common server too.
 
@@ -75,10 +84,23 @@ How big a packet may be in each direction, and how much data fits in one `SSH_FX
 
 ## Blast radius
 
-- [Request pairing](request-pairing.md) — enforces the outbound ceiling.
-- [Session lifetime](session-lifetime.md) — enforces the inbound ceiling and stores the limits.
-- [File transfer](file-transfer.md) — callers split by these numbers.
+- [Request pairing](request-pairing.md) — `enqueue` refuses by the encoded length, so the overheads
+  here have to agree with what it measures, or a chunk reported as fitting is refused.
+- [Session lifetime](session-lifetime.md) — `read_packet` ends the session on an oversized reply, so a
+  read length larger than the inbound ceiling is not refused but fatal.
+- [Packets](packets.md) — `WRITE_OVERHEAD` is a hand count of `Request::Write`'s encoding.
+- [File transfer](file-transfer.md) — callers split by these numbers, and a value that is too low only
+  wastes a little of every packet with no error anywhere.
+- [Verification](verification.md) — `tests/limits.rs` and the `max_chunk` tests pin the values from
+  both sides; each changed number has a test that should redden.
 
 ## Known holes / open
 
 - **No packet size above 262,144 has been measured** against a real server.
+- **`max_read_len` looks only at the outbound ceiling.** With `max_inbound_packet` set below
+  `max_outbound_packet`, a read of `max_read_len` can draw a reply above the inbound ceiling, which
+  ends the session as `TooLong` rather than refusing the read. `Config` does not check the two against
+  each other, and `read_file_watched` does not check `chunk_len` either. Found by reading; the defaults
+  are safe (4 MiB inbound, 262,144 outbound).
+- **Depth has no number.** How many bytes may be outstanding is set by the SSH channel window under
+  the crate, which it cannot see. Tracked: [#1](https://github.com/kihyun1998/justsftp/issues/1).

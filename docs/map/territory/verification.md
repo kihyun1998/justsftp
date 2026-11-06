@@ -14,11 +14,13 @@ drive a real `Session` against a fake server over an in-memory pipe, and the CI 
 
 - **No SSH anywhere.** The transport is `tokio::io::duplex` — two ends of an in-memory pipe. No SSH,
   no server, no channel, no network, no `russh`. That separability is the design, not a testing
-  convenience ([package and release](package-and-release.md)).
-- **The unit tests in `src/`, `concurrency.rs` and `round_trip.rs` name the mutation that reddens
-  them** in a comment; the control-flow files (`walk.rs`, `download.rs`, `upload.rs`, `limits.rs`) do
-  not. A green test proves nothing until it has been seen red; a named mutation is how the next
-  reader re-checks it.
+  convenience ([package](package-and-release.md)).
+- **Most unit tests in `src/`, `concurrency.rs` and `round_trip.rs` name the mutation that reddens
+  them** in a comment; the control-flow files (`walk.rs`, `download.rs`, `upload.rs`, `limits.rs`)
+  do not, and some in the first group do not either
+  (`a_server_that_never_answers_produces_a_timeout_rather_than_hanging`,
+  `an_unknown_response_type_names_the_byte_rather_than_guessing`). A green test proves nothing until
+  it has been seen red; a named mutation is how the next reader re-checks it.
 - **A decoder is graded against hand-written bytes, never against its own encoder.** A decoder
   checked against its own encoder agrees with itself and proves nothing. So `tests/round_trip.rs`
   writes its packets out by hand, and its `read_frame` is a second, tiny implementation rather than
@@ -88,16 +90,23 @@ drive a real `Session` against a fake server over an in-memory pipe, and the CI 
   pins the value; mutating the ceiling by one in either direction reddens it and nothing else.
 - **A test that forgets `close` fails**, because `ReadFile`/`WriteFile` assert on drop — which caught
   `the_ceiling_leaves_room_for_this_file_s_handle` forgetting.
-- **CI** runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` and
-  `cargo doc` with `-D warnings` (links must resolve on the public page), all `--locked`, on the
-  toolchain `rust-toolchain.toml` pins.
+- **The fake servers answer in order, one frame at a time, except where order is the subject.**
+  `walk.rs`, `download.rs` and `upload.rs` loop on read-then-reply; only
+  `two_requests_in_flight_are_answered_out_of_order_and_each_caller_gets_its_own_reply` holds replies
+  back and reverses them.
+- **Each test file has its own `read_frame` and reply builders.** There is no shared test module, so a
+  framing change is made once per file; for `round_trip.rs` the separation is the point, above.
+- **CI** runs `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings`,
+  `cargo test --locked` and `cargo doc --no-deps --locked` with `RUSTDOCFLAGS=-D warnings` (links must
+  resolve on the public page), on the toolchain `rust-toolchain.toml` pins, for every pull request and
+  push to `main`.
 
 ## Code
 
 - `tests/round_trip.rs`, `tests/concurrency.rs`, `tests/walk.rs`, `tests/download.rs`,
   `tests/upload.rs`, `tests/limits.rs`
 - the `#[cfg(test)] mod tests` in each `src/*.rs`
-- `.github/workflows/test.yml`, `rust-toolchain.toml`
+- `.github/workflows/test.yml`
 
 ## Reference behaviour
 
@@ -110,8 +119,15 @@ drive a real `Session` against a fake server over an in-memory pipe, and the CI 
 
 ## Blast radius
 
-- Every territory: each names the tests that hold it.
+- [Package](package-and-release.md) — the tests' transport is `tokio::io::duplex`, behind
+  the `io-util` feature; narrowing the feature set removes it, and adding an SSH dev-dependency removes
+  the point of it.
+- [Release](release.md) — the tag's job runs only `cargo test --locked`, so what this suite does not
+  hold is not checked on the way out.
+- Every territory: its tests pin behaviour, not structure, so check them after any change there.
 
 ## Known holes / open
 
 - **No test runs against a real server.** Every server here is a fixture.
+- **Examples marked `ignore` are not compiled**: the two `russh` examples in the
+  README and the crate docs would not notice a change in `russh`.

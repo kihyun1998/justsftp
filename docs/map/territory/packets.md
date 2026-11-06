@@ -56,6 +56,10 @@ extension admitted on its own argument (see [MAP](../MAP.md#penterm-provenance))
   write, handles (R42). A field of `0` means no limit stated (R41). A short body is an error, not zeros.
 - **Open flags are wire values**, confirmed identical in both reference implementations. The tests
   assert the open flags and the `Response` type numbers as literals.
+- **`Request`, `Response` and `Session::request` are public, and that is how a caller adds an
+  extension without this crate knowing it.** PenTerm sends `statvfs@openssh.com` this way and decodes
+  the `Response::ExtendedReply` itself (`sysinfo/remote.rs`, PenTerm `2aec7cd40`, 2026-11-06). A change
+  to either enum's shape is a breaking change for that caller, not an internal one.
 
 ## Code
 
@@ -75,10 +79,17 @@ extension admitted on its own argument (see [MAP](../MAP.md#penterm-provenance))
 
 ## Blast radius
 
-- [Request pairing](request-pairing.md) — `Request::encode` is what the outbound ceiling measures.
-- [Session lifetime](session-lifetime.md) — the handshake uses `encode_init` and `decode_version`.
-- [Transfer lengths](transfer-lengths.md) — `WRITE_OVERHEAD` is the shape `Request::Write` encodes to.
-- [Errors](errors.md) — `Status` is decoded here.
+- [Request pairing](request-pairing.md) — the outbound ceiling measures `Request::encode`'s length,
+  and `read_loop` reads the id itself before calling `Response::decode`; a reply layout whose id is
+  not first breaks that.
+- [Session lifetime](session-lifetime.md) — `Response::decode` reads `STATUS`'s message and language
+  tag unconditionally because the handshake refuses anything but v3. Accepting another version there
+  makes every status over-read here.
+- [Transfer lengths](transfer-lengths.md) — `WRITE_OVERHEAD` is a hand count of `Request::Write`'s
+  encoding; a field added there makes every full chunk one field too long.
+- [Errors](errors.md) — `Status` is decoded here, and a code it cannot hold fails the reply.
+- [Verification](verification.md) — fixtures in `tests/` write these layouts out by hand, so a changed
+  layout is changed there too rather than following the encoder.
 
 ## Known holes / open
 

@@ -15,7 +15,7 @@ draining. Plus the frame reader both the handshake and `read_loop` use.
 - **The stream is the only thing a `Session` knows about the world.** The type is not generic in its
   own signature on purpose — a caller should not have to name the stream type to hold a session — but
   the bound at `open` is exactly `AsyncRead + AsyncWrite + Unpin + Send + 'static`
-  ([package and release](package-and-release.md)).
+  ([package](package-and-release.md)).
 - **The handshake is on a clock**, and it is the one exchange where forgetting that hangs forever. A
   server can accept the `sftp` subsystem channel and then never send `SSH_FXP_VERSION` — the
   wedged-but-accepted case a caller has to tell apart from a dead link. `russh-sftp` routes its
@@ -66,10 +66,19 @@ draining. Plus the frame reader both the handshake and `read_loop` use.
 
 ## Blast radius
 
-- [Request pairing](request-pairing.md) — the loops `open` spawns.
-- [Transfer lengths](transfer-lengths.md) — the limits `open` stores.
-- [Packets](packets.md) — the handshake's codec.
+- [Request pairing](request-pairing.md) — `Drop` and `close` keep the writer alive to finish its
+  queue, which is what makes a cancelled request safe; aborting it brings back half a packet on the
+  wire.
+- [Transfer lengths](transfer-lengths.md) — `limits` is written once, in `open`, and read for the
+  session's whole life; a limit that could change later would leave lengths already handed out wrong.
+- [Packets](packets.md) — the version refusal here is what lets `Response::decode` read `STATUS`
+  without a version branch.
+- [Errors](errors.md) — `query_limits` names the variants that mean "the link is gone"; a variant it
+  does not name is read as "no limits" and the open succeeds.
 
 ## Known holes / open
 
-**None.**
+- **The writer can outlive the session on a wedged peer.** `close` stops waiting after `write_timeout`
+  and `Drop` does not wait, but neither aborts `write_loop`. Against a peer that never reads again the
+  task stays parked in `write_all`, holding the write half of the stream, with no clock of its own.
+  Found by reading `close`, `Drop` and `write_loop`; not measured.

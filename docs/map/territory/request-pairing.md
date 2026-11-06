@@ -92,6 +92,11 @@ recoverable by a later change.
   `Eof` to the rest, and `HashMap::drain` has no order, so *which* caller learned the truth was
   nondeterministic between runs. `reader_done` is published before the drain, so a racing request
   either sees the flag and fails fast or is already in the map and gets the cause.
+- **Cancelling a request stops the wait, not the request.** Once `enqueue` returns, the packet goes
+  out whole whatever the caller does; `a_cancelled_request_does_not_leave_half_a_packet_on_the_wire`
+  asserts it. A cancelled `WRITE` or `REMOVE`, and one that reported `Timeout` or `WriteTimeout`, may
+  therefore still happen on the server, and the caller cannot tell. The reply is dropped by the
+  no-waiter rule above.
 - **`enqueue` is split out of `request` for pipelining.** Pipelined file I/O needs a dispatch that
   returns the reply receiver without awaiting anything, so a caller can keep N requests outstanding
   — `russh-sftp`'s `send`, exposed as `write_nowait` and consumed by its `AsyncWrite for File` (E5). Fused
@@ -115,10 +120,21 @@ recoverable by a later change.
 
 ## Blast radius
 
-- [Session lifetime](session-lifetime.md) — `open` spawns the two loops; `close` and `Drop` stop them.
-- [Errors](errors.md) — every variant this produces.
-- [Verification](verification.md) — `tests/concurrency.rs` holds each step above.
+- [Session lifetime](session-lifetime.md) — the order of steps here assumes `write_loop` is never
+  aborted and `read_loop` publishes `reader_done` before draining; `close` and `Drop` must keep both.
+- [Errors](errors.md) — the variant a failure reports is what tells a caller "slow", "wedged" and
+  "gone" apart; returning a different one here changes a caller's retry decision.
+- [Transfer lengths](transfer-lengths.md) — the outbound refusal in `enqueue` is the half of the
+  chunking rule that those lengths exist to stay under.
+- [File transfer](file-transfer.md) — exposing `enqueue` or changing what `request` awaits changes how
+  many requests a transfer has outstanding, and with it every assumption of one at a time there.
+- [Verification](verification.md) — `tests/concurrency.rs` pins each numbered step with a window chosen
+  to observe it; a reordered step can leave a differently shaped test green.
 
 ## Known holes / open
 
-- **Pipelining is not built.** No measurement has picked a policy.
+- **Pipelining is not built.** No measurement has picked a policy, and `enqueue` stays private until
+  one does. Tracked: [#1](https://github.com/kihyun1998/justsftp/issues/1).
+- **The outbound queue has no bound.** `outbound` is an `mpsc::unbounded_channel` of whole encoded
+  packets. With one request per caller its depth is the caller's concurrency; nothing limits it if a
+  caller keeps more outstanding.
