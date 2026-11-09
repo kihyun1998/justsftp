@@ -107,6 +107,21 @@ recoverable by a later change.
   closes it if the waiter was an open. Without the `close`, a value landing
   between `try_recv` and the receiver's drop is lost: of 3,000,000 races on two threads, 51,655 were
   (2026-11-09, tokio 1.53.1), and none with it, where exactly one side closed each.
+- **Closing an abandoned open was not found to slow anything else, and costs little itself.** Measured
+  2026-11-09, `dc64f87` then `8c62c7b`, release build on Windows against an in-memory fake server, 7
+  alternating runs, median (lowest to highest). No real link was measured.
+
+  | Measure | Before | After |
+  |---|---|---|
+  | `stat` one at a time, per second | 197,537 (76,583 to 248,997) | 215,472 (149,532 to 234,192) |
+  | `stat` from 8 tasks, per second | 822,620 (780,872 to 931,525) | 890,811 (787,769 to 923,403) |
+  | `OPEN` then `CLOSE`, pairs per second | 77,291 (71,692 to 107,752) | 92,135 (51,611 to 117,584) |
+  | `ReadAhead` at depth 16, MB/s | 1,937 (1,852 to 2,139) | 2,076 (1,669 to 2,227) |
+  | 50,000 dropped opens, answered, until settled, ms | 59 (51 to 62) | 89 (79 to 97) |
+  | Bytes left per open never answered, of 100,000 | 0.1 | 6.6 |
+
+  The first four ranges overlap, so they show no slowdown and no speed-up. The 30 ms is the 50,000
+  `CLOSE`s now sent, about 0.6 µs each.
 - **When the reader ends, every waiter gets the real cause.** An earlier draft did `Err(_) => break`
   and then told everyone `Eof`, which made a `TooLong` refusal — the whole point of the inbound
   ceiling — indistinguishable from a server hanging up. A later one sent the cause to one waiter and
