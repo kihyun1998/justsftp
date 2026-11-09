@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 - `ReadAhead` and `WriteBehind` keep up to a caller-chosen depth of requests outstanding on one file,
   through `read_file_ahead`, `read_file_ahead_from`, `read_file_ahead_watched`, `write_file_behind` and

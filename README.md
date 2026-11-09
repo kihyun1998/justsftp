@@ -18,7 +18,7 @@ raw bytes and sends them back unchanged.
 
 ```toml
 [dependencies]
-justsftp = "0.1"
+justsftp = "0.2"
 ```
 
 ## Example

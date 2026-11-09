@@ -1,6 +1,6 @@
 [package]
 name = "justsftp"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.96"
 description = "An SFTP v3 client over any async byte stream, where a path is bytes, never a String."
