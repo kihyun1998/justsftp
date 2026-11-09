@@ -11,8 +11,10 @@
 - A request racing the end of the session now reports the cause rather than timing out.
 - Dropping a `ReadFile` or `WriteFile` without closing it, or the future of a watched loop or a directory
   walk, now sends `CLOSE`. It used to panic in a debug build and leak the server handle in a release
-  build. `close` still reports the result; a drop cannot. A future dropped while its open request is due
-  still leaks that handle on the server.
+  build. `close` still reports the result; a drop cannot.
+- An `OPEN` or `OPENDIR` whose caller has gone, by a dropped future, `Timeout` or `WriteTimeout`, now has
+  its handle closed when the reply arrives. It used to stay open on the server until the session ended.
+- `tokio` 1.22 or later is required.
 - `tokio`'s `macros` feature is no longer enabled by this crate.
 
 ## 0.1.0

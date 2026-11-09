@@ -91,7 +91,14 @@ drive a real `Session` against a fake server over an in-memory pipe, and the CI 
 - **`tests/dropping.rs` counts `CLOSE`s, in both directions**, for each type dropped, each watched future
   dropped, and `close` dropped before and after it sends: none is the leak, two is the new way to be wrong.
   They were checked against a real server from outside this repository: dropping open files past its
-  handle limit, on the code before and after ([file transfer](file-transfer.md)).
+  handle limit, on the code before and after ([file transfer](file-transfer.md)), and dropping opens
+  ([every handle is closed](../invariant/every-handle-is-closed.md)).
+- **Two of the delivery windows of an abandoned open cannot be reached through the public API.** A test
+  on one runtime thread cannot get between `read_loop` taking a waiter and sending to it. So
+  `a_handle_whose_receiver_has_gone_is_closed` puts that state in the map and runs the real `read_loop`,
+  and `a_reply_racing_the_drop_is_closed_by_exactly_one_side` races two OS threads for 20,000 rounds,
+  which a removed `Receiver::close` fails within the first few hundred (seen at round 256). On one core
+  it can only pass.
 - **The fake servers answer in order, one frame at a time, except where order is the subject.**
   `walk.rs`, `download.rs` and `upload.rs` loop on read-then-reply. Only
   `two_requests_in_flight_are_answered_out_of_order_and_each_caller_gets_its_own_reply` and

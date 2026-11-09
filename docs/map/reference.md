@@ -12,6 +12,7 @@ Versions read:
 - **OpenSSH portable** `master` at `ccc26c76cd47` — `PROTOCOL`, `sftp-server.c`, `sftp-client.c`.
 - **OpenSSH portable** at `102bee7f3a87` — the transfer loops, rows R46 to R52.
 - **russh 0.63.1** — what PenTerm depends on, and what the throughput was measured over.
+- **tokio 1.53.1** — from the local cargo registry, rows R56 and R57.
 - **draft-ietf-secsh-filexfer-02** (SFTP v3) and **RFC 4251**.
 
 To re-check a row, fetch the crate with
@@ -59,6 +60,7 @@ To re-check a row, fetch the crate with
 | R29 | `src/client/rawsession.rs:239-246` | `init()` goes through the same timed `request` path. |
 | E5 | `src/client/rawsession.rs:380` | `write_nowait` returns the reply receiver; `File`'s write path calls it. |
 | R55 | `src/client/fs/file.rs:146-154`, `src/client/rawsession.rs:317-323` | `impl Drop for File` calls `close_nowait` unless already closed; it sends `CLOSE` and hands back a receiver nobody keeps. |
+| R58 | `src/client/rawsession.rs:39-53` | `SessionInner::reply` ignores a failed send to a dropped receiver, so a `HANDLE` arriving for a timed-out or dropped request is lost. |
 | R53 | `src/client/fs/file.rs:181-182`, `:277-281` | `poll_read` awaits one `read` at a time; `poll_write` waits on the oldest ack only at `max_concurrent_writes`. |
 
 ### Issues and commits
@@ -128,6 +130,14 @@ At `102bee7f3a87`:
 | id | path:lines @0.63.1 | what it shows |
 |---|---|---|
 | R54 | `src/session.rs:321`, `src/client/mod.rs:2278` | a window adjust is sent once under half the target is left; `window_size` defaults to 2,097,152. |
+| R59 | `src/channels/io/mod.rs:30-44` | dropping the stream from `into_stream` sends `ChannelMsg::Close` for the channel, best effort. |
+
+## tokio
+
+| id | path:lines @1.53.1 | what it shows |
+|---|---|---|
+| R56 | `src/sync/oneshot.rs:888-947`, `:622`, `:1171`, `:1245` | `Receiver::close` stops further sends, which then fail and return the value from `send`; a value sent before it can still be read with `try_recv`. A receiver dropped without reading drops the value. |
+| R57 | `src/sync/mpsc/unbounded.rs:665-670`, `:707`, `CHANGELOG.md:2098` | `UnboundedSender::downgrade` gives a sender that does not keep the channel open; `upgrade` returns `None` once every strong sender is gone. Added in 1.22.0. |
 
 ## Specifications
 

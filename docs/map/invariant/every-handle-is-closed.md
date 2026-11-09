@@ -9,11 +9,16 @@ the result rather than what prevents a leak. A raw `Handle` from `open_dir`, `op
 `open_file_with` stays the caller's to close with `close_handle`: it is a public, cloneable value, and
 nothing can tell which copy is the last.
 
-**This does not hold while an `OPEN` or `OPENDIR` is due and nobody is left to receive its reply**: a
-future dropped then, or one that gave up with `Timeout` or `WriteTimeout`. The server has opened it, and
-`read_loop` discards the handle in the reply. Against OpenSSH 9.6, 12,000 such drops left the server
-refusing new opens, on this code as on the code before it, past its stated limit of 10,235
-([file transfer](../territory/file-transfer.md)).
+**It holds while an `OPEN` or `OPENDIR` is due and nobody is left to receive its reply**: a future
+dropped then, or one that gave up with `Timeout` or `WriteTimeout`. The session keeps the request's id
+and queues `CLOSE` when the reply brings a handle; a reply that had already landed unread is closed from
+`Sent`'s `Drop` ([request pairing](../territory/request-pairing.md)). Measured 2026-11-09 against
+OpenSSH 9.6p1's `sftp-server` in WSL2 over a pipe, not through `sshd`, stating a limit of 10,235: after
+12,000 such drops on one session, the next opens succeeded 0 times on `dc64f87` and 10,236 and 10,237 times, on two runs, with
+this. By reading, a burst larger than the limit can still see some of its own opens refused, since each
+`CLOSE` follows its reply behind the `OPEN`s already queued. `russh-sftp` leaves the handle open (R58).
+It does not hold once the reader has ended while the stream stays up, as after an oversized reply:
+`Outbox::send` refuses then, here as for `OpenHandle`'s `Drop`, and the handle stays until the session goes.
 
 ## Why it is cross-cutting
 
@@ -45,6 +50,8 @@ holds the drop path and the once-only rule for all of them; what each loop still
   built on `ReadFile` / `WriteFile`, and `read_file_ahead_watched` on `ReadAhead`; all of them hold an
   `OpenHandle`, the one place a handle is closed. `WriteBehind`'s `close` closes whichever way its flush
   ends.
+- [Request pairing](../territory/request-pairing.md) — an open nobody is left to answer is closed from
+  the reply path.
 - [Session lifetime](../territory/session-lifetime.md) — `Session::close` drains the writer's queue
   rather than discarding it; the packet most likely to be sitting there is the `SSH_FXP_CLOSE` a
   listing queued.
@@ -68,7 +75,8 @@ dropped when a pane or window closes (`explorer_remote_open.rs`, same commit).
 
 ## Where it will recur
 
-Any new loop that holds a server handle, and any change that keeps requests outstanding when a loop
+Any new request whose reply carries a handle (it joins `OPEN` and `OPENDIR` where `Outbox::send` sets
+`opening`), any new loop that holds a server handle, and any change that keeps requests outstanding when a loop
 ends. A read's late reply needs no draining for the session's sake, because a reply nobody waits for
 is dropped, but `CLOSE`'s reply comes after it on a server answering in order, so its clock would count
 them; a write's must be taken before the close, since that is how a failure is learned

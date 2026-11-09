@@ -2,7 +2,7 @@
 
 ## What it is
 
-How one request becomes one reply: `enqueue` registers a waiter under a fresh id and hands the
+How one request becomes one reply: `enqueue`, through `Outbox::send`, registers a waiter under a fresh id and hands the
 encoded packet to the writer task; `request` waits for the bytes to reach the stream and then for the
 reply; `read_loop` hands each reply to whoever is waiting on its id; `write_loop` owns the write half.
 Two of the eight upstream traps are here, both on the concurrency path
@@ -16,7 +16,7 @@ below.
 
 ## Design model
 
-The order of the steps in `enqueue` and `request` is the fix for upstream #33 and #95, and neither is
+The order of the steps in `Outbox::send` and `request` is the fix for upstream #33 and #95, and neither is
 recoverable by a later change.
 
 - **Liveness before anything else.** The reader ending is the ordinary shape of a peer going away —
@@ -62,7 +62,8 @@ recoverable by a later change.
   with `russh-sftp`'s 10 seconds (R27) without reading what each measures — there the budget is shared
   between waiting for the socket and waiting for the server, so a larger number here is also a
   stricter one.
-- **A cancelled request reclaims its slot through a `Drop` guard (`Slot`), and nothing else would.**
+- **A cancelled request reclaims its slot through a `Drop` guard (`Slot`), and nothing else would**
+  (an open's `Sent` takes the slot first, below, to remember the id).
   `read_loop` removes on a matching reply and `close()` drains, but a dropped future runs neither,
   because the sender half was moved into the map and only the receiver dies with the future. Against
   a server that never answers, the entry is permanent. The guard lives for the whole of `request`, so
@@ -87,22 +88,39 @@ recoverable by a later change.
   that one request with a real reason instead of killing the session.
 - **A reply nobody is waiting for is dropped.** The request timed out and deregistered, or the
   server is answering twice; tearing the session down over a packet that harms nothing would turn a
-  stray packet into a dropped connection.
+  stray packet into a dropped connection. The exception is the next item.
+- **An open nobody is left to answer is closed, keyed on what this client gave up rather than on what
+  the server sent** (maintainer, 2026-11-09, shown closing every `HANDLE` with no waiter as the
+  alternative). `Sent`'s `Drop` moves the id of an `OPEN` or `OPENDIR` still waiting into
+  `Waiters::abandoned`, and `read_loop` queues `CLOSE` if that id's reply is a `HANDLE`, so `CLOSE`s are
+  bounded by the opens this client abandoned. Closing every waiterless `HANDLE` would have let a server
+  grow the unbounded outbound queue one packet per packet it sends, and a repeated reply close a handle
+  a caller holds. Only requests that were sent get an entry, since `Sent` exists only then. An id in
+  `abandoned` still has a reply coming, so `Outbox::send` refuses to reuse it. An entry stays until its
+  reply comes, one `u32` per open, for the session's life if the server never answers.
+- **Only `OPEN` and `OPENDIR` are tracked.** A `Request::Extended` is expected to be answered with
+  `ExtendedReply`; one answered with a `HANDLE` and then abandoned is not closed, since whether a vendor's
+  handle is released by `CLOSE` is the vendor's.
+- **A handle already handed towards a waiter is closed by exactly one side.** A reply can be past the map
+  when the caller goes. `Sent`'s `Drop` calls `Receiver::close` and then `try_recv`: a value sent before
+  the close is read there, and a send after it fails and returns the value to `read_loop` (R56), which
+  closes it if the waiter was an open. Without the `close`, a value landing
+  between `try_recv` and the receiver's drop is lost: of 3,000,000 races on two threads, 51,655 were
+  (2026-11-09, tokio 1.53.1), and none with it, where exactly one side closed each.
 - **When the reader ends, every waiter gets the real cause.** An earlier draft did `Err(_) => break`
   and then told everyone `Eof`, which made a `TooLong` refusal — the whole point of the inbound
   ceiling — indistinguishable from a server hanging up. A later one sent the cause to one waiter and
   `Eof` to the rest, and `HashMap::drain` has no order, so *which* caller learned the truth was
   nondeterministic between runs. `reader_done` is published before the drain, so a racing request
-  either sees the flag and fails fast or is already in the map and gets the cause. `enqueue` reads the
+  either sees the flag and fails fast or is already in the map and gets the cause. `Outbox::send` reads the
   flag under the lock the reader drains under, which is what makes that "either": read outside it, a
   request could register just after the drain, wait out the budget and report `Timeout`. Found by
   reading; no test provokes that window.
 - **Cancelling a request stops the wait, not the request.** Once `enqueue` returns, the packet goes
   out whole whatever the caller does; `a_cancelled_request_does_not_leave_half_a_packet_on_the_wire`
   asserts it. A cancelled `WRITE` or `REMOVE`, and one that reported `Timeout` or `WriteTimeout`, may
-  therefore still happen on the server, and the caller cannot tell; a cancelled `OPEN` leaves a handle
-  open there ([file transfer](file-transfer.md)). The reply is dropped by the
-  no-waiter rule above.
+  therefore still happen on the server, and the caller cannot tell. A cancelled `OPEN` happens too, and
+  its handle is closed when the reply comes, above; other replies are dropped by the no-waiter rule.
 - **`enqueue` is split out of `request` for pipelining.** Pipelined file I/O needs a dispatch that
   returns the reply receiver without awaiting anything, so a caller can keep N requests outstanding
   — `russh-sftp`'s `send`, exposed as `write_nowait` and consumed by its `AsyncWrite for File` (E5). Fused
@@ -149,7 +167,8 @@ recoverable by a later change.
 
 ## Code
 
-- `src/session.rs` — `Pending`, `lock`, `Slot`, `Outbound`, `Sent` (`try_reply`), `Session::enqueue`,
+- `src/session.rs` — `Waiters`, `Pending`, `lock`, `Slot`, `Outbound`, `Sent` (`try_reply`, its `Drop`),
+  `Outbox` (`send`, `release`), `Session::enqueue`,
   `Session::reply_to`, `Session::request`,
   `Session::in_flight`, `write_loop`, `read_loop`
 
@@ -161,6 +180,7 @@ recoverable by a later change.
 ## Cross-cutting invariants
 
 - [Mechanism here, policy in the caller](../invariant/mechanism-here-policy-in-the-caller.md)
+- [Every handle is closed](../invariant/every-handle-is-closed.md)
 
 ## Blast radius
 

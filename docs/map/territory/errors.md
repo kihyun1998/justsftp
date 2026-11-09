@@ -35,8 +35,9 @@ the status number as it comes off the wire.
   another reply type (`client::unexpected`): *the server said no* is the useful sentence — the caller
   wants `NoSuchFile`, not "expected HANDLE".
 - **Each pair of look-alike variants is kept apart on purpose:**
-  - `RequestIdInUse` names a wrapped counter — something already waiting under the id. There is
-    no error for the inverse, a reply nothing waits on: `read_loop` drops it
+  - `RequestIdInUse` names a wrapped counter — something already waiting under the id, or an
+    abandoned open's reply still due. There is no error for the inverse, a reply nothing waits on:
+    `read_loop` drops it, closing an abandoned open's handle first
     ([request pairing](request-pairing.md)). An earlier draft reused an "unknown id" variant for the
     wrapped counter, so the log line read as the opposite of what happened.
   - `WriteTimeout` versus `Timeout` — `Timeout` means no answer arrived in budget; `WriteTimeout`

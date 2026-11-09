@@ -1,7 +1,7 @@
 //! The session: its lifetime, request/response pairing, and the timeouts
 //! (docs/map/territory/session-lifetime.md, docs/map/territory/request-pairing.md).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -12,7 +12,7 @@ use tokio::task::JoinHandle;
 
 use crate::error::{Error, Result};
 use crate::protocol::{
-    decode_limits, decode_version, encode_init, packet, Request, Response, ServerLimits,
+    decode_limits, decode_version, encode_init, packet, Handle, Request, Response, ServerLimits,
     ServerVersion, LIMITS_EXTENSION, VERSION,
 };
 use crate::wire::Reader;
@@ -65,16 +65,32 @@ impl Default for Config {
     }
 }
 
-/// The waiters by request id, behind a synchronous mutex so `Slot`'s `Drop` can take it
+/// A caller waiting for a reply.
+struct Waiter {
+    reply: oneshot::Sender<Result<Response>>,
+    /// Whether the request is an `OPEN` or `OPENDIR`.
+    opens: bool,
+}
+
+/// The requests still owed a reply, by id.
+#[derive(Default)]
+struct Waiters {
+    /// Who is waiting for each reply.
+    waiting: HashMap<u32, Waiter>,
+    /// `OPEN`s and `OPENDIR`s on the wire whose caller has gone, until their reply arrives.
+    abandoned: HashSet<u32>,
+}
+
+/// The waiters, behind a synchronous mutex so a `Drop` can take it
 /// (docs/map/territory/request-pairing.md).
-type Pending = Arc<Mutex<HashMap<u32, oneshot::Sender<Result<Response>>>>>;
+type Pending = Arc<Mutex<Waiters>>;
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     // A poisoned map is still a usable map.
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Removes a request's slot if the caller goes away before the reply lands; nothing else would
+/// Removes a request's slot if the caller goes away before the reply lands
 /// (docs/map/territory/request-pairing.md).
 struct Slot {
     pending: Pending,
@@ -84,7 +100,7 @@ struct Slot {
 impl Drop for Slot {
     fn drop(&mut self) {
         // A no-op if the reply already arrived.
-        lock(&self.pending).remove(&self.id);
+        lock(&self.pending).waiting.remove(&self.id);
     }
 }
 
@@ -97,9 +113,33 @@ struct Outbound {
 /// A request handed to the writer task, and what it still owes: `written` until its bytes reach the
 /// stream, then `reply`. Dropping it reclaims its slot in the pending map.
 pub(crate) struct Sent {
-    _slot: Slot,
+    slot: Slot,
+    /// Set on an `OPEN` or `OPENDIR`: where to queue the `CLOSE` if the handle reaches nobody.
+    opening: Option<Outbox>,
     written: Option<oneshot::Receiver<std::result::Result<(), Arc<Error>>>>,
     reply: oneshot::Receiver<Result<Response>>,
+}
+
+/// An open nobody will read is remembered until its reply arrives, or closed if the reply is
+/// already here (docs/map/invariant/every-handle-is-closed.md).
+impl Drop for Sent {
+    fn drop(&mut self) {
+        let Some(outbox) = &self.opening else {
+            return;
+        };
+        {
+            let mut pending = lock(&outbox.pending);
+            if pending.waiting.remove(&self.slot.id).is_some() {
+                pending.abandoned.insert(self.slot.id);
+                return;
+            }
+        }
+        // From here the reader's send fails, so the reply is either below or back with the reader.
+        self.reply.close();
+        if let Ok(Ok(Response::Handle(handle))) = self.reply.try_recv() {
+            outbox.release(handle);
+        }
+    }
 }
 
 impl Sent {
@@ -123,14 +163,90 @@ impl Sent {
     }
 }
 
+/// What queueing a request takes. The reader and each open's `Sent` hold a clone, to queue a
+/// `CLOSE`; the weak sender leaves the writer's queue to end when the `Session` lets go of it.
+#[derive(Clone)]
+struct Outbox {
+    pending: Pending,
+    outbound: mpsc::WeakUnboundedSender<Outbound>,
+    /// Set by the reader when it stops; `send` checks it first.
+    reader_done: Arc<AtomicBool>,
+    next_id: Arc<AtomicU32>,
+    max_outbound_packet: usize,
+}
+
+impl Outbox {
+    /// Registers a waiter and hands the encoded packet to the writer task, **without awaiting the
+    /// write** (docs/map/territory/request-pairing.md).
+    fn send(&self, outbound: &mpsc::UnboundedSender<Outbound>, req: Request) -> Result<Sent> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let opens = matches!(req, Request::Open { .. } | Request::OpenDir { .. });
+
+        // ① Register before writing, and refuse an id still outstanding after the counter wraps.
+        {
+            let mut pending = lock(&self.pending);
+            // Liveness first, under the lock the reader drains under: after a half-close the write half
+            // still accepts bytes that no reply will answer (docs/map/territory/request-pairing.md).
+            if self.reader_done.load(Ordering::Acquire) {
+                return Err(Error::Eof);
+            }
+            if pending.waiting.contains_key(&id) || pending.abandoned.contains(&id) {
+                return Err(Error::RequestIdInUse(id));
+            }
+            let reply = reply_tx;
+            pending.waiting.insert(id, Waiter { reply, opens });
+        }
+        let slot = Slot {
+            pending: Arc::clone(&self.pending),
+            id,
+        };
+
+        let bytes = req.encode(id);
+
+        // ② Refuse an oversized packet rather than send it.
+        if bytes.len() > self.max_outbound_packet {
+            return Err(Error::TooLong {
+                len: bytes.len() as u64,
+                limit: self.max_outbound_packet as u64,
+            });
+        }
+
+        // ③ Hand the whole packet to the writer task in one synchronous send. Writing inline here
+        //    would not be cancel-safe (docs/map/territory/request-pairing.md).
+        let (written_tx, written_rx) = oneshot::channel();
+        if outbound
+            .send(Outbound {
+                bytes,
+                written: written_tx,
+            })
+            .is_err()
+        {
+            return Err(Error::Eof);
+        }
+
+        Ok(Sent {
+            slot,
+            opening: opens.then(|| self.clone()),
+            written: Some(written_rx),
+            reply: reply_rx,
+        })
+    }
+
+    /// Queues a `CLOSE` for a handle nobody received. Its reply is one nobody waits for. Once the
+    /// `Session` has let go of the queue or the reader has ended, nothing is sent.
+    fn release(&self, handle: Handle) {
+        if let Some(outbound) = self.outbound.upgrade() {
+            let _ = self.send(&outbound, Request::Close { handle });
+        }
+    }
+}
+
 /// A live SFTP conversation over some byte stream — any
 /// `AsyncRead + AsyncWrite + Unpin + Send + 'static`, such as `russh::Channel::into_stream()`.
 pub struct Session {
-    pending: Pending,
+    outbox: Outbox,
     outbound: Option<mpsc::UnboundedSender<Outbound>>,
-    /// Set by the reader when it stops; `enqueue` checks it first.
-    reader_done: Arc<AtomicBool>,
-    next_id: AtomicU32,
     config: Config,
     server: ServerVersion,
     /// `None` when the server did not advertise `limits@openssh.com` or did not answer it usably.
@@ -157,23 +273,21 @@ impl Session {
             };
 
         let (rd, wr) = tokio::io::split(stream);
-        let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
-        let reader_done = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::unbounded_channel::<Outbound>();
+        let outbox = Outbox {
+            pending: Pending::default(),
+            outbound: tx.downgrade(),
+            reader_done: Arc::default(),
+            next_id: Arc::new(AtomicU32::new(1)),
+            max_outbound_packet: config.max_outbound_packet,
+        };
 
-        let reader = tokio::spawn(read_loop(
-            rd,
-            Arc::clone(&pending),
-            Arc::clone(&reader_done),
-            config.max_inbound_packet,
-        ));
+        let reader = tokio::spawn(read_loop(rd, outbox.clone(), config.max_inbound_packet));
         let writer = tokio::spawn(write_loop(wr, rx));
 
         let mut session = Self {
-            pending,
+            outbox,
             outbound: Some(tx),
-            reader_done,
-            next_id: AtomicU32::new(1),
             config,
             server,
             limits: None,
@@ -258,7 +372,7 @@ impl Session {
     /// How many requests are registered and still waiting for a reply. Zero when idle, including
     /// after a cancelled request.
     pub fn in_flight(&self) -> usize {
-        lock(&self.pending).len()
+        lock(&self.outbox.pending).waiting.len()
     }
 
     /// This session's settings — read by `Session::max_write_len`, which has to know the outbound
@@ -291,56 +405,8 @@ impl Session {
     /// Registers a waiter and hands the encoded packet to the writer task, **without awaiting the
     /// write** (docs/map/territory/request-pairing.md).
     pub(crate) fn enqueue(&self, req: Request) -> Result<Sent> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (reply_tx, reply_rx) = oneshot::channel();
-
-        // ① Register before writing, and refuse an id still outstanding after the counter wraps.
-        {
-            let mut pending = lock(&self.pending);
-            // Liveness first, under the lock the reader drains under: after a half-close the write half
-            // still accepts bytes that no reply will answer (docs/map/territory/request-pairing.md).
-            if self.reader_done.load(Ordering::Acquire) {
-                return Err(Error::Eof);
-            }
-            if pending.contains_key(&id) {
-                return Err(Error::RequestIdInUse(id));
-            }
-            pending.insert(id, reply_tx);
-        }
-        let slot = Slot {
-            pending: Arc::clone(&self.pending),
-            id,
-        };
-
-        let bytes = req.encode(id);
-
-        // ② Refuse an oversized packet rather than send it.
-        if bytes.len() > self.config.max_outbound_packet {
-            return Err(Error::TooLong {
-                len: bytes.len() as u64,
-                limit: self.config.max_outbound_packet as u64,
-            });
-        }
-
-        // ③ Hand the whole packet to the writer task in one synchronous send. Writing inline here
-        //    would not be cancel-safe (docs/map/territory/request-pairing.md).
-        let (written_tx, written_rx) = oneshot::channel();
         let outbound = self.outbound.as_ref().ok_or(Error::Eof)?;
-        if outbound
-            .send(Outbound {
-                bytes,
-                written: written_tx,
-            })
-            .is_err()
-        {
-            return Err(Error::Eof);
-        }
-
-        Ok(Sent {
-            _slot: slot,
-            written: Some(written_rx),
-            reply: reply_rx,
-        })
+        self.outbox.send(outbound, req)
     }
 
     /// Waits for what `sent` still owes: first for its bytes to reach the stream
@@ -391,9 +457,9 @@ impl Session {
         if let Some(reader) = self.reader.take() {
             reader.abort();
         }
-        let mut pending = lock(&self.pending);
-        for (_, tx) in pending.drain() {
-            let _ = tx.send(Err(Error::Eof));
+        let mut pending = lock(&self.outbox.pending);
+        for (_, waiter) in pending.waiting.drain() {
+            let _ = waiter.reply.send(Err(Error::Eof));
         }
     }
 }
@@ -405,9 +471,12 @@ impl std::fmt::Debug for Session {
         f.debug_struct("Session")
             .field("server_version", &self.server.version)
             .field("extensions", &self.server.extensions.len())
-            .field("next_id", &self.next_id.load(Ordering::Relaxed))
-            .field("in_flight", &lock(&self.pending).len())
-            .field("reader_done", &self.reader_done.load(Ordering::Relaxed))
+            .field("next_id", &self.outbox.next_id.load(Ordering::Relaxed))
+            .field("in_flight", &self.in_flight())
+            .field(
+                "reader_done",
+                &self.outbox.reader_done.load(Ordering::Relaxed),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -486,12 +555,7 @@ fn eof_as_eof(e: std::io::Error) -> Error {
 }
 
 /// The response loop. One packet at a time, each handed to whoever is waiting on its id.
-async fn read_loop<R: AsyncRead + Unpin>(
-    mut rd: R,
-    pending: Pending,
-    reader_done: Arc<AtomicBool>,
-    max: usize,
-) {
+async fn read_loop<R: AsyncRead + Unpin>(mut rd: R, outbox: Outbox, max: usize) {
     // Why the loop ended is carried to the waiters (docs/map/territory/request-pairing.md).
     let cause = loop {
         let (ty, body) = match read_packet(&mut rd, max).await {
@@ -508,25 +572,167 @@ async fn read_loop<R: AsyncRead + Unpin>(
         // The id first, so a body that does not decode fails only its own request.
         let decoded = Response::decode(ty, &mut r);
 
-        let waiter = lock(&pending).remove(&id);
-        match waiter {
-            Some(tx) => {
-                let _ = tx.send(decoded);
-            }
-            // A reply nobody is waiting for is dropped, not fatal.
-            None => continue,
+        let (waiter, abandoned) = {
+            let mut pending = lock(&outbox.pending);
+            (pending.waiting.remove(&id), pending.abandoned.remove(&id))
+        };
+        // A reply nobody is waiting for is dropped, not fatal; an abandoned open's handle is closed.
+        let unread = match waiter {
+            Some(waiter) => waiter.reply.send(decoded).err().filter(|_| waiter.opens),
+            None => abandoned.then_some(decoded),
+        };
+        if let Some(Ok(Response::Handle(handle))) = unread {
+            outbox.release(handle);
         }
     };
 
     // Published before the drain, so a racing request either fails fast or gets the cause.
-    reader_done.store(true, Ordering::Release);
+    outbox.reader_done.store(true, Ordering::Release);
 
     // Every waiter gets the same cause.
     let cause = Arc::new(cause);
-    let mut pending = lock(&pending);
-    for (_, tx) in pending.drain() {
-        let _ = tx.send(Err(Error::SessionEnded {
+    let mut pending = lock(&outbox.pending);
+    for (_, waiter) in pending.waiting.drain() {
+        let _ = waiter.reply.send(Err(Error::SessionEnded {
             cause: Arc::clone(&cause),
         }));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn outbox() -> (
+        Outbox,
+        mpsc::UnboundedSender<Outbound>,
+        mpsc::UnboundedReceiver<Outbound>,
+    ) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let outbox = Outbox {
+            pending: Pending::default(),
+            outbound: tx.downgrade(),
+            reader_done: Arc::default(),
+            next_id: Arc::new(AtomicU32::new(1)),
+            max_outbound_packet: 1024,
+        };
+        (outbox, tx, rx)
+    }
+
+    /// The reader has taken the waiter out of the map and its receiver is already gone, the state
+    /// no single-threaded schedule can reach through the public API.
+    #[tokio::test]
+    async fn a_handle_whose_receiver_has_gone_is_closed() {
+        let (outbox, _strong, mut queued) = outbox();
+        let (tx, rx) = oneshot::channel();
+        drop(rx);
+        lock(&outbox.pending).waiting.insert(
+            7,
+            Waiter {
+                reply: tx,
+                opens: true,
+            },
+        );
+
+        let (mut far, near) = tokio::io::duplex(64);
+        tokio::spawn(read_loop(near, outbox.clone(), 1024));
+        far.write_all(&[0, 0, 0, 10, 102, 0, 0, 0, 7, 0, 0, 0, 1, 0xAB])
+            .await
+            .unwrap();
+
+        let job = tokio::time::timeout(Duration::from_secs(5), queued.recv())
+            .await
+            .expect("a CLOSE is queued")
+            .unwrap();
+        assert_eq!(job.bytes[4], packet::CLOSE);
+        assert_eq!(&job.bytes[9..], &[0, 0, 0, 1, 0xAB]);
+    }
+
+    /// The same window on a request that opens nothing: its stray handle stays unclosed, while
+    /// an open's behind it is closed.
+    #[tokio::test]
+    async fn a_handle_for_a_non_open_whose_receiver_has_gone_is_not_closed() {
+        let (outbox, _strong, mut queued) = outbox();
+        for (id, opens) in [(7, false), (8, true)] {
+            let (reply, rx) = oneshot::channel();
+            drop(rx);
+            lock(&outbox.pending)
+                .waiting
+                .insert(id, Waiter { reply, opens });
+        }
+
+        let (mut far, near) = tokio::io::duplex(64);
+        tokio::spawn(read_loop(near, outbox.clone(), 1024));
+        far.write_all(&[0, 0, 0, 10, 102, 0, 0, 0, 7, 0, 0, 0, 1, 0xAA])
+            .await
+            .unwrap();
+        far.write_all(&[0, 0, 0, 10, 102, 0, 0, 0, 8, 0, 0, 0, 1, 0xAB])
+            .await
+            .unwrap();
+
+        let job = tokio::time::timeout(Duration::from_secs(5), queued.recv())
+            .await
+            .expect("a CLOSE is queued")
+            .unwrap();
+        assert_eq!(&job.bytes[9..], &[0, 0, 0, 1, 0xAB]);
+        assert!(queued.try_recv().is_err(), "only the open is closed");
+    }
+
+    /// The reader sends while `Sent` drops: whichever way it lands, one side closes the handle.
+    #[test]
+    fn a_reply_racing_the_drop_is_closed_by_exactly_one_side() {
+        use std::sync::mpsc as std_mpsc;
+
+        let (outbox, _strong, mut queued) = outbox();
+        let (work_tx, work_rx) = std_mpsc::channel::<oneshot::Sender<Result<Response>>>();
+        let (done_tx, done_rx) = std_mpsc::channel::<bool>();
+        let reader = std::thread::spawn(move || loop {
+            match work_rx.try_recv() {
+                Ok(tx) => {
+                    let handle = Response::Handle(Handle(vec![1]));
+                    done_tx.send(tx.send(Ok(handle)).is_err()).unwrap();
+                }
+                Err(std_mpsc::TryRecvError::Empty) => std::hint::spin_loop(),
+                Err(std_mpsc::TryRecvError::Disconnected) => return,
+            }
+        });
+
+        for round in 0..20_000u32 {
+            let (tx, rx) = oneshot::channel();
+            let sent = Sent {
+                slot: Slot {
+                    pending: Arc::clone(&outbox.pending),
+                    id: 0,
+                },
+                opening: Some(outbox.clone()),
+                written: None,
+                reply: rx,
+            };
+            work_tx.send(tx).unwrap();
+            for _ in 0..round % 256 {
+                std::hint::spin_loop();
+            }
+            drop(sent);
+            let reader_has_it = done_rx.recv().unwrap();
+            let drop_closed_it = queued.try_recv().is_ok();
+            assert_ne!(reader_has_it, drop_closed_it, "round {round}");
+        }
+        drop(work_tx);
+        reader.join().unwrap();
+    }
+
+    /// An abandoned id still has a reply on its way, so it cannot be given to a new request.
+    #[test]
+    fn an_abandoned_id_is_not_reused() {
+        let (outbox, strong, _queued) = outbox();
+        lock(&outbox.pending).abandoned.insert(5);
+        outbox.next_id.store(5, Ordering::Relaxed);
+        let sent = outbox.send(
+            &strong,
+            Request::Close {
+                handle: Handle(vec![1]),
+            },
+        );
+        assert!(matches!(sent, Err(Error::RequestIdInUse(5))));
     }
 }

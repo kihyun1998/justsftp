@@ -184,8 +184,8 @@ impl Session {
     /// [`Self::read_file_watched`] with up to `depth` requests outstanding. `on_chunk` is told in file
     /// order. Answering [`Walk::Stop`] sends no further request and closes the handle; the bytes
     /// already on their way are waited for and discarded, so a stop can take up to `depth` replies.
-    /// Dropping this future also closes the handle, once it is open, and reports nothing; dropped while
-    /// the open is due, the server keeps a handle nothing can close.
+    /// Dropping this future also closes the handle, as soon as the open's reply arrives if it is
+    /// still due, and reports nothing.
     pub async fn read_file_ahead_watched(
         &self,
         path: &[u8],

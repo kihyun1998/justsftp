@@ -55,6 +55,8 @@ No record in this repository. The maintainer's decisions and their reasons are o
   that lets an async source drive an async sink.
 - **`close` reports; `OpenHandle` guarantees.** Each open type holds an `OpenHandle`, whose `Drop` queues
   one `CLOSE` unless `close` has begun ([every handle is closed](../invariant/every-handle-is-closed.md)).
+  Against OpenSSH 9.6, 2026-11-06, dropping an open file was refused at drop 10,237 before that (limit
+  stated 10,235), and not in 12,000 after it.
 - **`write_file` creates and truncates.** Opening without `TRUNCATE` leaves the tail of a longer
   previous file behind — a corrupt destination that reports success: every write returns `Ok` and the
   file is simply too long, and nothing downstream can notice.
@@ -196,12 +198,6 @@ No record in this repository. The maintainer's decisions and their reasons are o
 
 - **What a ramp would save on many small files is unmeasured**, and so is whether shrinking requests
   would recover what a server short on every request costs at a real RTT.
-- **An `OPEN` nobody is left to answer leaks its handle.** With the future dropped, or gone with `Timeout`
-  or `WriteTimeout`, the server still opens the file, and `read_loop` holds the handle in the reply and
-  discards it as one nobody waits for. Measured against OpenSSH 9.6, 2026-11-06: 12,000 such
-  drops left it refusing new opens on the code before and after #3, where dropping an open file 12,000
-  times now does not (before, it refused at 10,237; limit stated 10,235). By reading, the same holds for
-  `OPENDIR` and `Session::open_file`, and `russh-sftp` does the same.
 - **`close` has no overall deadline of its own.** A server answering just inside each budget can hold it
   for `depth` times the two budgets; a caller bounds it from outside.
 - **A length of 0 is still accepted on the older paths.** `ReadAhead`'s `chunk_len` is a `NonZeroU32`, but

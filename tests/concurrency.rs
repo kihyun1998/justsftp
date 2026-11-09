@@ -158,7 +158,7 @@ async fn a_handshake_the_server_never_completes_times_out_rather_than_hanging() 
 
 /// An outbound packet over the ceiling is refused before it is sent.
 ///
-/// Mutation: replace the guard in `enqueue` with `if false`. The packet is sent, the silent server
+/// Mutation: replace the guard in `Outbox::send` with `if false`. The packet is sent, the silent server
 /// never answers, and this reddens as `Timeout` — quickly, since the budget here is short.
 #[tokio::test]
 async fn a_request_larger_than_the_outbound_ceiling_is_refused_before_it_is_sent() {
@@ -506,7 +506,7 @@ async fn a_stream_that_ends_fails_the_waiting_requests_instead_of_leaving_them_t
 /// After a half-close, a new request fails at once with `Eof` instead of waiting out the reply
 /// budget.
 ///
-/// Mutation: delete the `reader_done` check at the top of `Session::enqueue`. This test then takes
+/// Mutation: delete the `reader_done` check at the top of `Outbox::send`. This test then takes
 /// the full budget and fails with `Timeout` instead of `Eof`.
 #[tokio::test(start_paused = true)]
 async fn a_request_issued_after_the_reader_died_fails_at_once_rather_than_waiting_out_the_budget() {

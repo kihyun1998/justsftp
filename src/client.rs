@@ -132,10 +132,9 @@ impl Session {
     /// `on_batch` is handed the batch that just landed and the **running total** read so far, and
     /// answers whether to keep going. It runs only when a batch lands, so a stop waits up to one
     /// round trip; answering [`Walk::Stop`] sends no further request. The handle is closed whichever
-    /// way the walk ends — at `EOF`, on a failure, or on a stop, and when this future is dropped once
-    /// the directory is open; dropped while the open is due, the server keeps a handle nothing can
-    /// close. SFTP has no way to ask how many entries a directory holds, so there is
-    /// no total to report against.
+    /// way the walk ends — at `EOF`, on a failure, or on a stop, and when this future is dropped, as
+    /// soon as the open's reply arrives if it is still due. SFTP has no way to ask how many entries a
+    /// directory holds, so there is no total to report against.
     pub async fn list_dir_watched(
         &self,
         path: &[u8],
@@ -236,8 +235,8 @@ impl Session {
     /// answering [`Walk::Stop`] sends no further request. Nothing is
     /// written anywhere and nothing is kept: the bytes are the callback's. A short read is not
     /// treated as the end; only the server's `EOF` is. A zero-length `DATA` reply is passed on as
-    /// an empty chunk. Dropping this future also closes the handle, once the file is open, and reports
-    /// nothing; dropped while the open is due, the server keeps a handle nothing can close.
+    /// an empty chunk. Dropping this future also closes the handle, as soon as the open's reply
+    /// arrives if it is still due, and reports nothing.
     pub async fn read_file_watched(
         &self,
         path: &[u8],
@@ -424,8 +423,8 @@ impl Session {
     /// `next` is asked for up to `chunk_len` bytes each time and answers with a [`Feed`]; the caller
     /// sizes `chunk_len`, for example by [`WriteFile::max_chunk`]. Each write is all or an error,
     /// so the count in [`Upload`] is exact. An endless run of empty `Feed::Bytes` loops. Dropping this
-    /// future also closes the handle, once the file is open, and reports nothing; dropped while the
-    /// open is due, the server keeps a handle nothing can close.
+    /// future also closes the handle, as soon as the open's reply arrives if it is still due, and
+    /// reports nothing.
     pub async fn write_file_watched(
         &self,
         path: &[u8],

@@ -15,6 +15,7 @@ call when it moved out of PenTerm (PenTerm ADR-0089, *Amendment — the crate is
 
 ## Design model
 
+- **`tokio`'s floor is 1.22**, for `mpsc::WeakUnboundedSender` (R57).
 - **`tokio` is the only dependency, and three absences are deliberate.** Each is held only by being
   absent, so it comes off without an error.
   - **No SSH dependency, not even under `[dev-dependencies]`.** The crate is driven over any

@@ -40,6 +40,11 @@ the writer drain and does not wait. Plus the frame reader both the handshake and
   in the channel — and the one most likely to be there is the `SSH_FXP_CLOSE` a listing queued to
   release its handle ([every handle is closed](../invariant/every-handle-is-closed.md)). Waiting for
   the writer is bounded by `write_timeout`: a wedged peer must not make teardown wait forever either.
+- **`Session` holds the only strong sender to the writer's queue.** The reader and each open's `Sent`
+  hold a weak one through `Outbox`, to queue a `CLOSE` for a handle nobody received. A strong clone in the
+  reader would keep the queue open after `close` drops the session's, and `close` would then wait out
+  `write_timeout` (`closing_the_session_does_not_wait_for_the_write_budget`). Once the session has let go,
+  such a `CLOSE` is not sent: the stream is ending, and with it the channel over `russh` (R59).
 - **`Drop` aborts the reader and not the writer, and that asymmetry is the point.** Dropping the
   sender lets the writer finish its current packet and the queue; aborting it would be the one
   remaining way to leave half a packet on the wire. The reader only reads, so stopping it mid-call
